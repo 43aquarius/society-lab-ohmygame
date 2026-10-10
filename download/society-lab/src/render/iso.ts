@@ -2,9 +2,11 @@
  * 等距投影与坐标变换（v3.0）
  * - 海拔抬升统一入口：所有"站在地面上"的东西（建筑/小人/特效）
  *   必须经过 elevOffset，否则会陷入地下或悬空。
+ * - v4.0：地形为分块流式，elevAt 委托给 worldgen.tileAt（自动加载 chunk）。
  */
 
 import type { WorldState } from '../types';
+import { elevAt } from '../worldgen';
 
 export const TILE_W = 64;
 export const TILE_H = 32;
@@ -30,13 +32,7 @@ export function tileCenter(x: number, y: number, elevation = 0): Point {
   return { x: p.x, y: p.y - elevation * ELEV_H };
 }
 
-/** 读取格子海拔（越界返回大值，视为不可攀的高墙） */
-export function elevAt(w: WorldState, x: number, y: number): number {
-  const size = w.config.size;
-  const xi = x | 0, yi = y | 0;
-  if (xi < 0 || yi < 0 || xi >= size || yi >= size) return 99;
-  return w.tiles[yi * size + xi].elevation;
-}
+export { elevAt };
 
 /** 站在 (x,y) 地面上的世界像素（含海拔抬升）——建筑/小人/特效统一入口 */
 export function surfacePoint(w: WorldState, x: number, y: number): Point {

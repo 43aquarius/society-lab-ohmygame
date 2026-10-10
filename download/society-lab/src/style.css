@@ -459,3 +459,68 @@ kbd {
   .obs-grid { grid-template-columns: 1fr; }
   .help-cols { grid-template-columns: 1fr; }
 }
+
+/* ============ v4.0 万邦时代 UI ============ */
+
+/* 顶栏：世界纪元徽章 */
+.badge-era {
+  padding: 5px 12px; border-radius: 8px; font-size: 12.5px; font-weight: 700;
+  background: rgba(95, 127, 216, 0.16); color: #9db4e8;
+  border: 1px solid rgba(95, 127, 216, 0.35); white-space: nowrap;
+}
+.badge-form.clickable { cursor: pointer; }
+.badge-form.clickable:hover { filter: brightness(1.15); }
+
+/* 文明色点 */
+.civ-dot {
+  display: inline-block; width: 9px; height: 9px; border-radius: 3px;
+  margin-right: 5px; vertical-align: -1px; flex-shrink: 0;
+}
+
+/* 编年史：文明筛选按钮 */
+.chron-toolbar button .civ-dot { width: 8px; height: 8px; margin: 0 3px 0 0; }
+
+/* 观察者：文明切换按钮 */
+.civ-pick {
+  display: flex; align-items: center; width: 100%; text-align: left;
+  padding: 7px 10px; margin: 3px 0; border-radius: 8px; cursor: pointer;
+  background: var(--paper-2); border: 1px solid var(--line);
+  font-size: 12.5px; color: var(--ink); font-family: inherit;
+}
+.civ-pick:hover { border-color: var(--teal); }
+.civ-pick.active { border-color: var(--teal); background: rgba(47, 126, 118, 0.12); }
+.civ-pick.dead { opacity: 0.45; }
+
+/* 万邦面板 */
+.civ-hint { font-size: 12.5px; color: var(--ink-soft); margin-bottom: 12px; line-height: 1.7; }
+.civ-list { display: flex; flex-direction: column; gap: 10px; }
+.civ-card {
+  background: var(--paper-2); border: 1px solid var(--line); border-radius: 10px;
+  padding: 12px 14px; cursor: pointer; transition: border-color 0.15s, transform 0.15s;
+}
+.civ-card:hover { border-color: var(--teal); transform: translateY(-1px); }
+.civ-card.observed { border-color: var(--teal); box-shadow: 0 0 0 1px rgba(47,126,118,0.35); }
+.civ-card.dead { opacity: 0.55; cursor: default; }
+.cc-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cc-head b { font-size: 14.5px; }
+.cc-form {
+  padding: 2px 9px; border-radius: 7px; font-size: 12px; font-weight: 700;
+  background: rgba(201, 162, 39, 0.18); color: #d9b44a; border: 1px solid rgba(201,162,39,0.35);
+}
+.cc-entity { font-size: 11.5px; color: var(--ink-soft); }
+.cc-sub { font-size: 12px; color: var(--ink-soft); margin: 5px 0 7px; }
+.cc-basis {
+  background: rgba(20, 26, 24, 0.04); border-radius: 8px; padding: 8px 11px;
+  display: grid; grid-template-columns: 1fr; gap: 4px;
+}
+.cc-basis div { font-size: 12px; line-height: 1.55; color: var(--ink-soft); }
+.cc-basis b { color: var(--ink); margin-right: 6px; }
+.cc-tech { font-size: 11.5px; color: var(--ink-soft); margin-top: 7px; }
+
+/* 窄窗口：纪元徽章收缩 */
+@media (max-width: 1280px) {
+  .badge-era { font-size: 11.5px; padding: 4px 8px; }
+}
+@media (max-width: 1020px) {
+  .badge-era { display: none; }
+}

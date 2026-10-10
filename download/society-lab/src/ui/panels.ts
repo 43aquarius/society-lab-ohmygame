@@ -11,6 +11,7 @@ import { classifySociety, formLabel } from '../sim/society';
 import { techSummary } from '../sim/technology';
 import { housingCapacity } from '../sim/population';
 import { castPurify, castCivPower, GOD_POWERS, canAfford } from '../powers';
+import { worldEra, civEntityName } from '../names';
 import { listSlots, saveToSlot, loadFromSlot, exportToFile, importFromFile, pinSnapshot, branchFromSnapshot, deserialize, type SlotInfo } from '../saves';
 
 const FORM_NAMES_FALLBACK = (f: string): string => FORM_NAMES[f as SocietyForm] ?? f;
@@ -119,11 +120,12 @@ export function openChronicle(w: WorldState, actions: PanelActions) {
       if (filter === 'major') return e.severity >= 0.5;
       if (filter === 'god') return e.intervened;
       if (filter === 'institution') return e.category === 'institution' || e.category === 'politics';
+      if (filter.startsWith('civ')) return e.civId === Number(filter.slice(3));
       return true;
     });
     // 时代分组：按形态变迁分段
     const eras: { label: string; items: ChronicleEntry[] }[] = [];
-    let curForm = w.civ.form;
+    let curForm = (w.civs[w.observedCiv] ?? w.civs[0]).form;
     let bucket: ChronicleEntry[] = [];
     const formNames: Record<string, string> = {
       primitive: '原始社会', slave: '奴隶制社会', feudal: '封建社会',
@@ -147,6 +149,7 @@ export function openChronicle(w: WorldState, actions: PanelActions) {
           <button data-f="major" class="${filter === 'major' ? 'active' : ''}">重大</button>
           <button data-f="institution" class="${filter === 'institution' ? 'active' : ''}">制度变迁</button>
           <button data-f="god" class="${filter === 'god' ? 'active' : ''}">神迹</button>
+          ${w.civs.filter(c => !c.dead).map(c => `<button data-f="civ${c.id}" class="${filter === 'civ' + c.id ? 'active' : ''}" title="${c.name}"><span class="civ-dot" style="background:${c.color}"></span>${c.name.slice(0, 4)}</button>`).join('')}
         </div>
         ${entries.length === 0 ? '<div class="chron-empty">历史尚未开始书写。<br>推进时间，或施加你的第一个神迹。</div>' : ''}
         ${entries.map(e => {
@@ -269,10 +272,11 @@ function drawStackChart(canvas: HTMLCanvasElement, data: { year: number; elite: 
   ctx.fillText('财富分配：金=精英 灰=中间 绿=平民', x0, y0 + 4);
 }
 
-export function openObserver(w: WorldState) {
-  const v = w.civ.vars;
-  const macro = macroEconomy(w);
-  const cls = classifySociety(w);
+export function openObserver(w: WorldState, civId?: number) {
+  const civ = w.civs[civId ?? w.observedCiv] ?? w.civs[0];
+  const v = civ.vars;
+  const macro = macroEconomy(w, civ);
+  const cls = classifySociety(w, civ);
   const varRows: [string, number, string][] = [
     ['粮食保障率', macro.foodRatio, '#5d8a6a'],
     ['存粮（人·年）', macro.foodStock / Math.max(1, macro.population), '#8aa05d'],
@@ -305,7 +309,7 @@ export function openObserver(w: WorldState) {
   const modal = openModal(`
     <div class="modal-head">
       <span class="mh-ic" style="background:#2f7e76">${icon('chart', 18)}</span>
-      <h2>观察者 · 社会实验数据</h2>
+      <h2>观察者 · ${civ.name}（${FORM_NAMES_FALLBACK(civ.form)}）</h2>
       <button class="modal-close">${icon('close', 16)}</button>
     </div>
     <div class="modal-body">
@@ -335,17 +339,25 @@ export function openObserver(w: WorldState) {
               <span class="v">${gated ? '未达' : sc.toFixed(2)}</span>
             </div>`;
           }).join('')}
-          <div style="font-size:11.5px;color:var(--ink-soft);margin-top:8px">判定：${formLabel(cls)}（自第 ${w.civ.formSince} 年起）</div>
+          <div style="font-size:11.5px;color:var(--ink-soft);margin-top:8px">判定：${formLabel(cls)}（自第 ${civ.formSince} 年起）</div>
         </div>
         <div class="obs-chart">
-          <h5>技术水平</h5>
-          <div style="font-size:12.5px;line-height:2">${techSummary(w)}</div>
-          <div style="font-size:11.5px;color:var(--ink-soft)">知识点累计 ${Math.round(w.civ.tech.points)} · 启蒙思潮 ${(w.civ.enlightenment * 100).toFixed(0)}%</div>
+          <h5>技术水平（${civ.name}）</h5>
+          <div style="font-size:12.5px;line-height:2">${techSummary(civ)}</div>
+          <div style="font-size:11.5px;color:var(--ink-soft)">知识点累计 ${Math.round(civ.tech.points)} · 启蒙思潮 ${(civ.enlightenment * 100).toFixed(0)}%</div>
+        </div>
+        <div class="obs-chart">
+          <h5>万邦（点击切换观察文明）</h5>
+          ${w.civs.map(c => `<button class="civ-pick ${c.dead ? 'dead' : ''} ${c.id === civ.id ? 'active' : ''}" data-civ="${c.id}"><span class="civ-dot" style="background:${c.color}"></span>${c.name} · ${FORM_NAMES_FALLBACK(c.form)} · ${c.vars.population}人</button>`).join('')}
         </div>
       </div>
     </div>`, true);
 
-  const hist = w.history;
+  modal.querySelectorAll('.civ-pick').forEach(b => b.addEventListener('click', () => {
+    closeModal();
+    openObserver(w, Number((b as HTMLElement).dataset.civ));
+  }));
+  const hist = civ.history;
   if (hist.length) {
     drawLineChart(modal.querySelector('#obs-pop')!, hist.map(h => ({ year: h.year, v: h.pop })), 'rgb(93,138,106)', 0);
     drawLineChart(modal.querySelector('#obs-food')!, hist.map(h => ({ year: h.year, v: h.food })), 'rgb(192,162,39)', 0, 2, 1);
@@ -365,9 +377,10 @@ export function openObserver(w: WorldState) {
 
 // ---------- 社会形态卡 ----------
 
-export function openFormCard(w: WorldState) {
-  const cls = classifySociety(w);
-  const v = w.civ.vars;
+export function openFormCard(w: WorldState, civId?: number) {
+  const civ = w.civs[civId ?? w.observedCiv] ?? w.civs[0];
+  const cls = classifySociety(w, civ);
+  const v = civ.vars;
   const desc: Record<string, string> = {
     primitive: '人们以亲缘结成小共同体，共同劳动、平均分享。土地与工具属于所有成员。剩余产品稀少，社会规模受生态直接约束。',
     slave: '一部分人被强制为他人劳动。社会已能生产剩余，权力机构开始系统地服务于有产者。强制劳动带来产出，也埋下反抗的种子。',
@@ -383,21 +396,88 @@ export function openFormCard(w: WorldState) {
   openModal(`
     <div class="modal-head">
       <span class="mh-ic" style="background:#c9a227">${icon('branch', 18)}</span>
-      <h2>社会形态 · ${formLabel(cls)}</h2>
+      <h2>社会形态 · ${civ.name} · ${formLabel(cls)}</h2>
       <button class="modal-close">${icon('close', 16)}</button>
     </div>
     <div class="modal-body">
       <div class="event-card-text">${desc[cls.form]}</div>
+      <div class="ce-section"><h5>判定书（历史唯物主义四要素）</h5>
+        <ul>
+          <li><b>生产资料所有制</b>：${cls.basis.ownership}</li>
+          <li><b>阶级关系</b>：${cls.basis.classes}</li>
+          <li><b>分配关系</b>：${cls.basis.distribution}</li>
+          <li><b>上层建筑</b>：${cls.basis.superstructure}</li>
+        </ul>
+      </div>
       <div class="ce-section"><h5>判定依据</h5><ul>${cls.causes.map(c => `<li>${c}</li>`).join('')}</ul></div>
       ${blockedRows}
       <div class="ce-section effects"><h5>制度结构</h5>
         <ul>
           <li>所有制：共有 ${Math.round(v.ownCommon * 100)}% · 私有 ${Math.round(v.ownPrivate * 100)}% · 公有 ${Math.round(v.ownPublic * 100)}%</li>
           <li>劳动关系：强制 ${Math.round(v.laborForced * 100)}% · 依附 ${Math.round(v.laborBonded * 100)}% · 雇佣 ${Math.round(v.laborWage * 100)}% · 合作 ${Math.round(v.laborCoop * 100)}%</li>
-          <li>自第 ${w.civ.formSince} 年进入此形态${w.civ.prevForm ? `（此前：${FORM_NAMES_FALLBACK(w.civ.prevForm)}）` : ''}</li>
+          <li>自第 ${civ.formSince} 年进入此形态${civ.prevForm ? `（此前：${FORM_NAMES_FALLBACK(civ.prevForm)}）` : ''}</li>
         </ul>
       </div>
     </div>`);
+}
+
+// ---------- 万邦面板（v4.0：世界诸文明列表 + 马义判定书） ----------
+
+export function openCivsPanel(w: WorldState, actions: PanelActions & { observeCiv: (id: number) => void }) {
+  const era = worldEra(w);
+  const cards = w.civs.map(civ => {
+    if (civ.dead) {
+      return `<div class="civ-card dead" data-civ="${civ.id}">
+        <div class="cc-head"><span class="civ-dot" style="background:${civ.color}"></span><b>${civ.name}</b><span class="cc-form">已消亡</span></div>
+        <div class="cc-sub">存在 ${w.year - civ.founded} 年后湮灭</div>
+      </div>`;
+    }
+    const cls = classifySociety(w, civ);
+    const macro = macroEconomy(w, civ);
+    const mySettlements = w.settlements.filter(s => !s.dead && s.civId === civ.id);
+    const largest = [...mySettlements].sort((a, b) => b.population - a.population)[0];
+    const entity = civEntityName(civ.form, largest?.stage ?? 'camp', mySettlements.length);
+    const t = civ.tech.levels;
+    return `<div class="civ-card ${civ.id === w.observedCiv ? 'observed' : ''}" data-civ="${civ.id}">
+      <div class="cc-head">
+        <span class="civ-dot" style="background:${civ.color}"></span>
+        <b>${civ.name}</b>
+        <span class="cc-form">${formLabel(cls)}</span>
+        <span class="cc-entity">${entity}</span>
+      </div>
+      <div class="cc-sub">${macro.population} 人 · ${mySettlements.length} 处聚落 · 存续 ${w.year - civ.founded} 年${civ.met.length ? ` · 已知 ${civ.met.length} 个异邦` : ''}</div>
+      <div class="cc-basis">
+        <div><b>所有制</b> ${cls.basis.ownership}</div>
+        <div><b>阶级</b> ${cls.basis.classes}</div>
+        <div><b>分配</b> ${cls.basis.distribution}</div>
+        <div><b>上层建筑</b> ${cls.basis.superstructure}</div>
+      </div>
+      <div class="cc-tech">农耕${t.agriculture ?? 1} · 工具${t.crafting ?? 1} · 营造${t.building ?? 1} · 商贸${t.commerce ?? 1} · 治理${t.governance ?? 1} · 工业${t.industry ?? 1}</div>
+    </div>`;
+  }).join('');
+
+  openModal(`
+    <div class="modal-head">
+      <span class="mh-ic" style="background:#5f7fd8">${icon('people', 18)}</span>
+      <h2>万邦 · ${w.civs.filter(c => !c.dead).length} 个文明并立 · ${era.name}</h2>
+      <button class="modal-close">${icon('close', 16)}</button>
+    </div>
+    <div class="modal-body">
+      <div class="civ-hint">世界纪元：${era.name}——${era.desc}。每个文明依其生产关系独立判定社会形态；点击卡片将该文明设为观察对象。</div>
+      <div class="civ-list">${cards}</div>
+    </div>`, true);
+
+  const modalEl = document.querySelector('#modal-root .modal')!;
+  modalEl.querySelectorAll('.civ-card').forEach(card => card.addEventListener('click', () => {
+    const id = Number((card as HTMLElement).dataset.civ);
+    const civ = w.civs[id];
+    if (!civ || civ.dead) return;
+    actions.observeCiv(id);
+    // 镜头飞往该文明最大聚落
+    const best = w.settlements.filter(s => !s.dead && s.civId === id).sort((a, b) => b.population - a.population)[0];
+    if (best) actions.focusSettlement(best);
+    closeModal();
+  }));
 }
 
 // ---------- 存档面板 ----------
@@ -575,7 +655,8 @@ export function openHelp() {
 
 export function showSettlementPanel(sidepanel: HTMLElement, w: WorldState, s: Settlement, actions: PanelActions) {
   const housing = housingCapacity(s);
-  const macro = macroEconomy(w);
+  const civ = w.civs[s.civId] ?? w.civs[0];
+  const macro = macroEconomy(w, civ);
   const counts = new Map<string, number>();
   for (const b of s.buildings) counts.set(b.kind, (counts.get(b.kind) ?? 0) + 1);
   sidepanel.innerHTML = `
@@ -585,6 +666,7 @@ export function showSettlementPanel(sidepanel: HTMLElement, w: WorldState, s: Se
     </div>
     <div class="sp-inner">
       <div class="sub">${STAGE_NAMES[s.stage]} · 建立于第 ${s.founded} 年 · ${s.dead ? '已废弃' : '发展中'}</div>
+      <div class="sub"><span class="civ-dot" style="background:${civ.color}"></span> 属于 <b>${civ.name}</b> · ${FORM_NAMES_FALLBACK(civ.form)} · ${civEntityName(civ.form, s.stage, w.settlements.filter(x => !x.dead && x.civId === civ.id).length)}</div>
       <div class="sp-section">
         <h5>人口与生存</h5>
         <div class="kv"><span class="k">人口</span><span class="v">${s.population}</span></div>

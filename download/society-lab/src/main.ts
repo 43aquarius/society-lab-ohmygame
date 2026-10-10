@@ -7,6 +7,7 @@ import './style.css';
 import { CFG } from './config';
 import { Rng, type WorldState, type GodPowerId, type Settlement } from './types';
 import { newWorld, tickYear } from './sim/manager';
+import { worldEra } from './names';
 import { macroEconomy } from './sim/economy';
 import { castBrushPower, castCivPower, castPurify, powerChronicleEntry, GOD_POWERS, canAfford } from './powers';
 import { classifySociety, formLabel } from './sim/society';
@@ -20,7 +21,7 @@ import {
   type HudCallbacks,
 } from './ui/hud';
 import {
-  openChronicle, openObserver, openSaveMenu, openHelp, openFormCard, openEventCard, closeModal,
+  openChronicle, openObserver, openSaveMenu, openHelp, openFormCard, openEventCard, openCivsPanel, closeModal,
   showSettlementPanel, hideSettlementPanel, collapseSettlementPanel, updateEventFeed, isModalOpen,
 } from './ui/panels';
 import { WORLD_TITLES } from './names';
@@ -81,19 +82,20 @@ class Game {
                 </div>
               </div>
               <div class="form-item">
-                <label>地图规模（v2.0 全面扩大）</label>
+                <label>地图规模（分块流式生成 · 无边漫游）</label>
                 <select id="new-size">
-                  <option value="64">中等 64×64</option>
-                  <option value="96" selected>标准 96×96</option>
-                  <option value="128">辽阔 128×128</option>
+                  <option value="256">辽阔 256×256</option>
+                  <option value="512" selected>广袤 512×512</option>
+                  <option value="1024">无垠 1024×1024</option>
                 </select>
               </div>
               <div class="form-item">
-                <label>初始聚落数</label>
+                <label>初始文明数（各自独立演化社会形态）</label>
                 <select id="new-settlements">
-                  <option value="1" selected>1 处（推荐）</option>
-                  <option value="2">2 处</option>
-                  <option value="3">3 处</option>
+                  <option value="1">1 个（单一文明史诗）</option>
+                  <option value="2" selected>2 个（对照观察）</option>
+                  <option value="3">3 个</option>
+                  <option value="4">4 个（万邦并起）</option>
                 </select>
               </div>
             </div>
@@ -236,7 +238,7 @@ class Game {
     this.speed = 1;
     this.activePower = null;
     this.lastFeedYear = -1;
-    this.lastForm = w.civ.form;
+    this.lastForm = (w.civs[w.observedCiv] ?? w.civs[0])?.form ?? 'primitive';
     (document.getElementById('menu') as HTMLElement).style.display = 'none';
     const gameEl = document.getElementById('game') as HTMLElement;
     gameEl.classList.remove('hidden');
@@ -269,12 +271,12 @@ class Game {
     const canvas = document.getElementById('world-canvas') as HTMLCanvasElement;
     this.vw = new VisualWorld(canvas);
     this.vw.minimap = document.createElement('canvas');
-    this.vw.minimap.width = this.vw.minimap.height = w.config.size;
-    this.vw.terrainCache.dirty = true;
+    this.vw.terrainCache.invalidateAll();
     // v3.0：开局即有居民（不等第一个模拟年）
     this.vw.agents.syncYear(w);
     (window as any).__fitViewport?.();
-    this.vw.fitMap(w.config.size);
+    // v4.0：超大世界没有"全景"——直接降临在观察文明的家园
+    this.vw.focusObservedCiv(w);
     this.bindCanvasInput(canvas);
     this.bindKeys();
     this.audio.ensure();
@@ -284,7 +286,7 @@ class Game {
     const tbCollapsed = localStorage.getItem('society-lab-tb-collapsed') === '1';
     if (tbCollapsed) setToolbarCollapsed(hud.toolbar, true);
     updateTopbar(gameEl, w, name);
-    this.showHint('全景开局 · 滚轮放大细看 · H 回到全景 · 左侧选择神力', 5200);
+    this.showHint('神明降临在文明的家园 · 拖拽漫游无垠世界 · 小地图点击跳转 · Tab 收起工具栏', 5200);
     toast(`世界「${name}」已苏醒`, 'good', 'seed');
   }
 
@@ -299,6 +301,14 @@ class Game {
     this.speed = 0;
     setHudSpeed(this.els.topbar, 0);
     (this.els.sidepanel as HTMLElement).classList.add('hidden');
+  }
+
+  /** v4.0：切换观察文明（顶栏/神力目标随之切换） */
+  observeCiv(id: number) {
+    if (!this.world || !this.world.civs[id] || this.world.civs[id].dead) return;
+    this.world.observedCiv = id;
+    this.refreshHud();
+    toast(`正在观察 ${this.world.civs[id].name}`, 'neutral', 'people');
   }
 
   private hudCallbacks(): HudCallbacks {
@@ -358,10 +368,14 @@ class Game {
         this.audio.setMuted(!this.audio.muted);
         setMuteIcon(this.els.topbar, this.audio.muted);
       },
-      onHome: () => this.vw && this.world && this.vw.fitMap(this.world.config.size),
+      onHome: () => this.vw && this.world && this.vw.focusObservedCiv(this.world),
       onCollapseToolbar: (collapsed) => {
         localStorage.setItem('society-lab-tb-collapsed', collapsed ? '1' : '0');
       },
+      onCivs: () => this.world && openCivsPanel(this.world, {
+        ...this.panelActions(),
+        observeCiv: (id: number) => this.observeCiv(id),
+      }),
     };
   }
 
@@ -461,7 +475,7 @@ class Game {
       // hover tile
       const tile = this.vw.screenToTile(e.clientX, e.clientY);
       this.vw.hoverTile = this.activePower && tile &&
-        tile.x >= 0 && tile.y >= 0 && tile.x < this.world.config.size && tile.y < this.world.config.size ? tile : null;
+        tile.x >= 0 && tile.y >= 0 && tile.x < this.world.gen.size && tile.y < this.world.gen.size ? tile : null;
       if (!dragging) return;
       const dx = e.clientX - lastX, dy = e.clientY - lastY;
       moved += Math.abs(dx) + Math.abs(dy);
@@ -484,13 +498,8 @@ class Game {
       if (!this.vw || !this.world) return;
       e.preventDefault();
       const factor = e.deltaY > 0 ? 0.88 : 1.14;
-      // 缩放下限随地图自适应：允许缩到全景之外一点
-      const rect = this.vw.canvas.getBoundingClientRect();
-      const fitZoom = Math.min(
-        rect.width / (this.world.config.size * 64),
-        rect.height / (this.world.config.size * 32 + 72),
-      ) * 0.96;
-      this.vw.camera.targetZoom = Math.max(fitZoom * 0.75, Math.min(2.8, this.vw.camera.targetZoom * factor));
+      // v4.0：巨大世界不再有"整图全景"，最低缩放到分块概览档
+      this.vw.camera.targetZoom = Math.max(0.22, Math.min(2.4, this.vw.camera.targetZoom * factor));
     }, { passive: false });
     canvas.addEventListener('contextmenu', e => {
       e.preventDefault();
@@ -504,9 +513,18 @@ class Game {
 
   private handleClick(px: number, py: number, button: number) {
     if (!this.world || !this.vw || button !== 0) return;
+    // 小地图区域点击 → 镜头跳转（v4.0）
+    const mm = this.vw.minimapClick(px, py);
+    if (mm) {
+      const target = { x: (mm.gx - mm.gy) * 32, y: (mm.gx + mm.gy) * 16 };
+      this.vw.camera.targetX = target.x;
+      this.vw.camera.targetY = target.y;
+      this.audio.click();
+      return;
+    }
     const tile = this.vw.screenToTile(px, py);
     if (!tile) return;
-    const size = this.world.config.size;
+    const size = this.world.gen.size;
     if (tile.x < 0 || tile.y < 0 || tile.x >= size || tile.y >= size) {
       // 神力就绪时点到沙盘外给出提示，避免“点了没反应”的困惑（v1.0.1）
       if (this.activePower) this.showHint('点击在沙盘之外 · 请点在地图上施放', 1800);
@@ -522,9 +540,9 @@ class Game {
           this.world.chronicle.push(entry);
         }
         // 地形变化 → 重建缓存与小地图
-        const terrainPowers: GodPowerId[] = ['forest', 'fertile', 'meadow', 'water', 'ore', 'uplift', 'meteor', 'wildfire'];
+        const terrainPowers: GodPowerId[] = ['forest', 'fertile', 'meadow', 'water', 'ore', 'uplift', 'meteor', 'wildfire', 'drought'];
         if (terrainPowers.includes(this.activePower)) {
-          this.vw.terrainCache.dirty = true;
+          this.vw.terrainCache.invalidate(this.world, tile.x, tile.y);
           this.vw.minimapDirty = true;
         }
         // 特效
@@ -617,7 +635,7 @@ class Game {
           }
           break;
         case 'h': case 'H':
-          this.vw?.fitMap(this.world.config.size);
+          this.vw?.focusObservedCiv(this.world);
           break;
         case 'c': case 'C': openChronicle(this.world, this.panelActions()); break;
         case 'o': case 'O': openObserver(this.world); break;
@@ -698,12 +716,11 @@ class Game {
     updateEventFeed(this.els.feed, w, this.panelActions(), this.lastFeedYear);
     this.lastFeedYear = w.year;
 
-    // 雨声强度
+    // 雨声强度（稀疏天气表）
     if (this.vw && this.world) {
       let wetCount = 0;
-      const step = 3;
-      for (let i = 0; i < this.world.weather.length; i += step * step) {
-        if (this.world.weather[i].wet > 0.5) wetCount++;
+      for (const cell of this.world.weather.values()) {
+        if (cell.wet > 0.5) wetCount++;
       }
       this.audio.setRainIntensity(Math.min(1, wetCount / 40));
     }
@@ -711,11 +728,11 @@ class Game {
     // 自动存档（每 10 年）
     if (w.year % 10 === 0) autosave(w, this.worldName);
 
-    // 文明湮灭提示
-    if (w.civ.vars.population === 0 && w.year > 10) {
+    // 文明湮灭提示（全部文明消亡才算世界终结）
+    if (w.civs.length > 0 && w.civs.every(c => c.dead) && w.year > 10) {
       this.speed = 0;
       setHudSpeed(this.els.topbar, 0);
-      toast('文明已经湮灭……可读取存档或从分支重启', 'bad', 'alert');
+      toast('所有文明都已湮灭……可读取存档或从分支重启', 'bad', 'alert');
     }
   }
 }
@@ -728,15 +745,18 @@ class Game {
       const g = (window as any).__game as Game | undefined;
       if (!g?.world) return null;
       const w = g.world;
-      const macro = macroEconomy(w);
-      const cls = classifySociety(w);
+      const civ = w.civs[w.observedCiv] ?? w.civs[0];
+      const macro = macroEconomy(w, civ);
+      const cls = classifySociety(w, civ);
       return {
         year: w.year,
-        form: w.civ.form,
+        form: civ.form,
         formLabel: formLabel(cls),
         population: macro.population,
         foodRatio: Math.round(macro.foodRatio * 1000) / 1000,
-        unrest: Math.round(w.civ.vars.unrest * 1000) / 1000,
+        unrest: Math.round(civ.vars.unrest * 1000) / 1000,
+        civCount: w.civs.filter(c => !c.dead).length,
+        civs: w.civs.filter(c => !c.dead).map(c => ({ id: c.id, name: c.name, form: c.form, pop: c.vars.population })),
         settlements: w.settlements.filter(s => !s.dead).length,
         buildings: w.settlements.reduce((a, s) => a + s.buildings.length, 0),
         chronicleLength: w.chronicle.length,
@@ -754,7 +774,7 @@ class Game {
     setSeed: (seed: number) => {
       const g = (window as any).__game as Game | undefined;
       if (!g) return false;
-      const w = newWorld({ seed: seed >>> 0, size: 48, mode: 'free', settlements: 1, scenario: 'dawn' });
+      const w = newWorld({ seed: seed >>> 0, size: 256, mode: 'free', settlements: 2, scenario: 'dawn' });
       g.startWorld(w, `测试世界 ${seed}`);
       return true;
     },

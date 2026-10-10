@@ -7,6 +7,7 @@
  * 建造中有脚手架；农田作物随年度周期生长，饥荒年枯黄。
  */
 import { BuildingKind, type Building, type WorldState } from '../types';
+import { tileAt } from '../worldgen';
 import { TILE_W, TILE_H, ELEV_H, vhash, elevAt } from './iso';
 
 export interface BuildingPalette {
@@ -428,8 +429,8 @@ function drawCompleted(
     }
     case BuildingKind.Farm: {
       const growth = cropGrowth(w, b);
-      const sid = w.tiles[b.y * w.config.size + b.x].owner;
-      const st = sid >= 0 ? w.settlements[sid] : null;
+      const sid = tileAt(w, b.x, b.y)?.owner ?? -1;
+      const st = sid >= 0 ? w.settlements.find(x => x.id === sid) ?? null : null;
       drawField(ctx, sx, sy, growth, seed, st ? st.shortageYears > 1 : false);
       break;
     }
@@ -1034,7 +1035,8 @@ function cropGrowth(w: WorldState, b: Building): number {
 }
 
 function eraOf(w: WorldState, b: Building): number {
-  const t = w.civ.tech.levels;
+  const owner = w.settlements.find(s => s.buildings.some(x => x.id === b.id));
+  const t = (owner ? w.civs[owner.civId] : w.civs[0]).tech.levels;
   const lvl = (d: string) => t[d] ?? 1;
   switch (b.kind) {
     case BuildingKind.Camp: return 0;
