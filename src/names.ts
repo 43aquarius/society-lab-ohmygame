@@ -64,6 +64,7 @@ export function settlementName(rng: Rng, stage: string, used: Set<string>): stri
 /**
  * 聚落升/降级时更新名称后缀（部落 → 村 → 镇 → 城）。
  * 名称中的专名（如"河阳"）保持不变，保证历史连续性。
+ * v4.0.1：同基名聚落过多时用方位词区分（上/下/东/西……），杜绝重名。
  */
 export function renameForStage(name: string, stage: SettlementStage, used: Set<string>): string {
   const base = stripStageSuffix(name);
@@ -72,6 +73,14 @@ export function renameForStage(name: string, stage: SettlementStage, used: Set<s
   let guard = 0;
   while (used.has(next) && guard++ < 20) {
     next = base + pickByHash(base + guard, suffixPool);
+  }
+  if (used.has(next)) {
+    // 兑底：方位词插入专名与后缀之间（历史地名的真实区分法）
+    const dirs = ['上', '下', '东', '西', '南', '北', '新', '旧'];
+    for (const d of dirs) {
+      const cand = base + d + pickByHash(base + d, suffixPool);
+      if (!used.has(cand)) { next = cand; break; }
+    }
   }
   if (name !== next) {
     used.delete(name);
@@ -101,24 +110,30 @@ export function civEntityName(form: SocietyForm, largestStage: SettlementStage, 
   }
 }
 
-/** v4.0 世界纪元：由最先进文明的技术水平推导（顶栏展示人类历史进程） */
+/**
+ * v4.0 世界纪元：由最先进文明的技术水平推导（顶栏展示人类历史进程）。
+ * v4.0.1 重校准：现代纪元由工业等级主导——机器大生产是资本主义的水位线，
+ * 工业三级即对应资本主义门槛，纪元不应落后于社会形态。
+ */
 export function worldEra(w: import('./types').WorldState): { name: string; desc: string } {
-  let best = 0;
+  let craft = 1, agri = 1, ind = 1, edu = 1;
   for (const c of w.civs) {
     if (c.dead) continue;
     const t = c.tech.levels;
-    const score = (t.crafting ?? 1) * 3 + (t.agriculture ?? 1) * 2 + (t.industry ?? 1) * 5;
-    if (score > best) best = score;
+    craft = Math.max(craft, t.crafting ?? 1);
+    agri = Math.max(agri, t.agriculture ?? 1);
+    ind = Math.max(ind, t.industry ?? 1);
+    edu = Math.max(edu, t.education ?? 1);
   }
-  const ind = best / 10;
-  // 大致对标：石器 <3 / 青铜 <6 / 铁器 <9 / 中古 <14 / 工业革命 <22 / 电气 <30 / 信息 30+
-  if (ind < 2.2) return { name: '石器时代', desc: '打磨的石块与火种，人类的黎明' };
-  if (ind < 3.6) return { name: '青铜时代', desc: '炉火中流出金绿色的金属，国家开始出现' };
-  if (ind < 5.0) return { name: '铁器时代', desc: '廉价的铁器进入千家万户，帝国与诸子百家' };
-  if (ind < 6.6) return { name: '中古时代', desc: '土地与信仰编织秩序，商路连接远方' };
-  if (ind < 8.4) return { name: '工业时代', desc: '机器的轰鸣重塑生产与阶级' };
-  if (ind < 9.8) return { name: '电气时代', desc: '夜幕下的城市第一次亮如白昼' };
-  return { name: '信息时代', desc: '知识的洪流冲刷着旧世界的堤岸' };
+  // 现代纪元：工业主导（信息时代还需要文教支撑）
+  if (ind >= 7 && edu >= 6) return { name: '信息时代', desc: '知识的洪流冲刷着旧世界的堤岸' };
+  if (ind >= 5) return { name: '电气时代', desc: '夜幕下的城市第一次亮如白昼' };
+  if (ind >= 3) return { name: '工业时代', desc: '机器的轰鸣重塑生产与阶级' };
+  // 前工业纪元：由工具与农耕定档（铁犁牛田—中古庄园的层次感）
+  if (craft >= 6 || agri >= 6) return { name: '中古时代', desc: '土地与信仰编织秩序，商路连接远方' };
+  if (craft >= 4 || agri >= 4) return { name: '铁器时代', desc: '廉价的铁器进入千家万户，帝国与诸子百家' };
+  if (craft >= 3 || agri >= 3) return { name: '青铜时代', desc: '炉火中流出金绿色的金属，国家开始出现' };
+  return { name: '石器时代', desc: '打磨的石块与火种，人类的黎明' };
 }
 
 export const WORLD_TITLES = [

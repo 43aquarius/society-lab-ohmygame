@@ -166,8 +166,12 @@ test('社会识别器：五种形态都能被正确识别（马义判定书）',
   assert.ok(cap.basis.classes.includes('雇佣'), '资本主义判定书应写明雇佣劳动关系');
 
   // 社会主义：公有制 + 按劳分配 + 人民国家
+  // v4.0.1：历史唯物主义——社会主义只能从资本主义内部生长（测试需先经历资本主义）
   const soc = set(w => {
     const v = w.civs[0].vars;
+    w.civs[0].form = 'capitalist';
+    w.civs[0].prevForm = 'feudal';
+    w.civs[0].formSince = 100;
     v.ownPublic = 0.6; v.ownPrivate = 0.08; v.ownCommon = 0.3;
     v.laborCoop = 0.6; v.laborWage = 0.2; v.laborForced = 0; v.laborBonded = 0;
     v.publicServices = 0.7; v.participation = 0.7; v.education = 0.6;
@@ -178,6 +182,21 @@ test('社会识别器：五种形态都能被正确识别（马义判定书）',
   });
   assert.equal(soc.form, 'socialist', `实际=${soc.form}`);
   assert.ok(soc.basis.distribution.includes('按劳分配'), '社会主义判定书应为按劳分配');
+
+  // v4.0.1 回归：原始社会不能直接跃入社会主义（跨越资本主义不可行）
+  const socJump = set(w => {
+    const v = w.civs[0].vars;
+    v.ownPublic = 0.6; v.ownPrivate = 0.08; v.ownCommon = 0.3;
+    v.laborCoop = 0.6; v.laborWage = 0.2; v.laborForced = 0; v.laborBonded = 0;
+    v.publicServices = 0.7; v.participation = 0.7; v.education = 0.6;
+    w.civs[0].tech.levels.industry = 4;
+    w.civs[0].tech.progress.industry = 999;
+    w.settlements[0].population = 500;
+    w.settlements[0].stage = 'town';
+  });
+  assert.notEqual(socJump.form, 'socialist', `原始世界不应直接跃入社会主义（实际=${socJump.form}）`);
+  assert.ok(socJump.blocked.some(b => b.form === 'socialist' && b.missing.some(x => x.includes('资本主义'))),
+    '社会主义前置应写明须从资本主义生长');
 });
 
 test('多文明并存：不同文明可同时处于不同社会形态', () => {

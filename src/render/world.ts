@@ -656,8 +656,10 @@ export class VisualWorld {
       const ownerColor = new Map<number, [number, number, number]>();
       for (let py = 0; py < imgW; py++) {
         for (let px = 0; px < imgW; px++) {
-          const gx = Math.round(win.x0 + (px / (imgW - 1)) * win.span);
-          const gy = Math.round(win.y0 + (py / (imgW - 1)) * win.span);
+          // 与 minimapClick/视口多边形完全同构的线性映射：[0,imgW] → [x0, x0+span]
+          // （修复旧版 px/(imgW-1) 插值与点击映射的系统性偏移，远端可达 ~2 格）
+          const gx = Math.round(win.x0 + (px / imgW) * win.span);
+          const gy = Math.round(win.y0 + (py / imgW) * win.span);
           const i = (py * imgW + px) * 4;
           const t = peekTile(w, gx, gy);
           if (!t) {
@@ -680,10 +682,10 @@ export class VisualWorld {
         }
       }
       mc.putImageData(img, 0, 0);
-      // 聚落点（文明色 + 白描边；窗口外不画）
+      // 聚落点（文明色 + 白描边；窗口外不画）——与像素映射同构
       for (const s of w.settlements) {
-        const sx = Math.round(((s.x - win.x0) / win.span) * (imgW - 1));
-        const sy = Math.round(((s.y - win.y0) / win.span) * (imgW - 1));
+        const sx = Math.round(((s.x - win.x0) / win.span) * imgW);
+        const sy = Math.round(((s.y - win.y0) / win.span) * imgW);
         if (sx < 1 || sy < 1 || sx > imgW - 2 || sy > imgW - 2) continue;
         const civ = w.civs[s.civId];
         mc.fillStyle = s.dead ? '#8a8a8a' : (civ?.color ?? '#ffd66e');

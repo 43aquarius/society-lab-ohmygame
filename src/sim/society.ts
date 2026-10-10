@@ -45,7 +45,7 @@ function formGates(w: WorldState, civ: Civilization): Record<SocietyForm, string
   if ((m = miss(surplus >= 0.08, '农业剩余不足（剩余是奴役他人的物质前提）'))) slave.push(m);
   if ((m = miss(v.stateCapacity >= 0.16, '国家机器未成型（需要暴力机关维持占有）'))) slave.push(m);
   if ((m = miss(has('village'), '尚无村庄规模的聚落'))) slave.push(m);
-  if ((m = miss(v.laborForced >= 0.12, '对人的直接占有未成规模'))) slave.push(m);
+  if ((m = miss(v.laborForced >= 0.12 || macro.urbanization >= 0.22, '强制劳动未成规模，城市聚集亦不足（城市本身依赖强制劳动）'))) slave.push(m);
 
   const feudal: string[] = [];
   if ((m = miss(lvl('agriculture') >= 5, `农耕技术不足（需5级，现${lvl('agriculture')}）`))) feudal.push(m);
@@ -68,7 +68,9 @@ function formGates(w: WorldState, civ: Civilization): Record<SocietyForm, string
   if ((m = miss(v.participation >= 0.4, '政治参与不足'))) socialist.push(m);
   if ((m = miss(v.ownPublic + v.laborCoop >= 0.42, '公有与合作部门不足'))) socialist.push(m);
   if ((m = miss(has('town'), '尚无城镇作为公共治理的基础'))) socialist.push(m);
-  if ((m = miss(civ.form === 'capitalist' || v.laborWage > 0.15 || civ.prevForm !== null, '尚无成熟的社会组织（需从既有形态演进而来）'))) socialist.push(m);
+  // 历史唯物主义：社会主义只能从资本主义社会的矛盾中生长
+  // （其物质前提——社会化大生产——由资本主义创造；原始/奴隶/封建社会无法直接跃入）
+  if ((m = miss(civ.form === 'capitalist' || civ.form === 'socialist', '社会主义只能从资本主义的内部生长（社会化大生产尚不存在）'))) socialist.push(m);
 
   return { primitive: [], slave, feudal, capitalist, socialist, collapsed: [] };
 }
@@ -94,10 +96,14 @@ export function classifySociety(w: WorldState, civ: Civilization): Classificatio
   }
 
   const gates = formGates(w, civ);
+  // 城镇/城市是阶级社会的物质证据（乌鲁克、雅典、罗马皆奴隶制城邦）：
+  // 氏族公社无法组织千人的聚落——分工、剩余榨取与暴力机器是城市存在的前提
+  const hasTown = w.settlements.some(s => !s.dead && s.civId === civ.id && stageRank(s.stage) >= 3);
 
   // —— 评分：生产资料所有制是第一权重（核心标准），劳动关系次之 ——
   const scores: Record<SocietyForm, number> = {
     // 原始：公社公有制 + 无阶级分化 + 无剩余榨取
+    // （城镇与城市是阶级社会的物质证据，与氏族公有制不相容）
     primitive:
       v.ownCommon * 1.1
       + (1 - Math.max(v.laborForced, v.laborBonded, v.laborWage)) * 0.34
@@ -105,11 +111,14 @@ export function classifySociety(w: WorldState, civ: Civilization): Classificatio
       + (surplus < 0.12 ? 0.3 : 0)
       + (1 - v.specialization) * 0.2
       + (v.stateCapacity < 0.2 ? 0.14 : 0)
+      - (hasTown ? 0.55 : 0)
       - (v.laborForced + v.laborBonded) * 0.5,
     // 奴隶制：奴隶主占有生产资料 + 直接占有劳动者人身
+    // （城市聚集本身依赖强制劳动——古代城市多为奴隶制城邦）
     slave: gates.slave.length ? -1 :
       v.ownPrivate * 0.62
       + v.laborForced * 1.5
+      + macro.urbanization * 0.3
       + surplus * 0.14
       + v.stateCapacity * 0.12
       + civ.warMemory * 0.2

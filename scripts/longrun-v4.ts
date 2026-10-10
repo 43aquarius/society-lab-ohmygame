@@ -53,3 +53,39 @@ const spread = w.chronicle.filter(e => e.title.includes('技艺东渐'));
 const newCiv = w.chronicle.filter(e => e.title.includes('新文明诞生'));
 console.log(`战争 ${wars.length} 次 · 文明相遇 ${cross.length} 次 · 技术扩散 ${spread.length} 次 · 新文明诞生 ${newCiv.length} 次`);
 console.log(`chunk 缓存：${w.chunks.size} 个（modified: ${[...w.chunks.values()].filter(c=>c.modified).length}）`);
+
+// ===== v4.0.1 历史进程正确性断言（马克思主义形态序列）=====
+let violations: string[] = [];
+for (const c of w.civs) {
+  if (c.dead) continue;
+  // 1) 原始文明不应拥有城镇级聚落（城市是阶级社会的物质证据）
+  if (c.form === 'primitive') {
+    const towns = w.settlements.filter(s => !s.dead && s.civId === c.id && ['town', 'city'].includes(s.stage));
+    if (towns.length) violations.push(`${c.name}: 原始形态却有 ${towns.length} 个城镇级聚落（${towns.map(t=>t.name).slice(0,3).join(',')}）`);
+  }
+}
+// 2) 社会主义只能从资本主义生长（从形态变迁事件序列校验）
+const formSeq = new Map<number, string[]>();
+for (const e of w.chronicle.filter(e => e.category === 'institution' && e.title.includes('→'))) {
+  if (e.civId === undefined) continue;
+  if (!formSeq.has(e.civId)) formSeq.set(e.civId, ['primitive']);
+  formSeq.get(e.civId)!.push(e.title.split('→')[1].trim().replace(/（.*）/, ''));
+}
+for (const [civId, seq] of formSeq) {
+  const c = w.civs[civId];
+  if (!c) continue;
+  let prev = 'primitive';
+  for (const cur of seq) {
+    if (cur === '社会主义社会' && prev !== '资本主义社会') {
+      violations.push(`${c?.name ?? '文明' + civId}: ${prev} → 社会主义（未经历资本主义）`);
+    }
+    prev = cur;
+  }
+}
+if (violations.length) {
+  console.log(`\n⚠ 历史进程违规 ${violations.length} 条：`);
+  for (const v of violations) console.log('  ✗ ' + v);
+  process.exit(1);
+} else {
+  console.log('\n✓ 历史进程断言全部通过：无原始+城镇矛盾、无跨越资本主义的社会主义');
+}
