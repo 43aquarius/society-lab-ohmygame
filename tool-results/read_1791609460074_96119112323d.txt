@@ -1,0 +1,632 @@
+     1→/**
+     2→ * Panels — 模态框（事件卡/编年史/观察者/存档/帮助/社会形态）与右侧详情面板
+     3→ */
+     4→import {
+     5→  type WorldState, type ChronicleEntry, type EventRecord, type Settlement, STAGE_NAMES, FORM_NAMES, type SocietyForm,
+     6→} from '../types';
+     7→import { BUILDINGS, STAGE_THRESHOLDS } from '../config';
+     8→import { icon, EVENT_ICON } from './icons';
+     9→import { macroEconomy } from '../sim/economy';
+    10→import { classifySociety, formLabel } from '../sim/society';
+    11→import { techSummary } from '../sim/technology';
+    12→import { housingCapacity } from '../sim/population';
+    13→import { castPurify, castCivPower, GOD_POWERS, canAfford } from '../powers';
+    14→import { listSlots, saveToSlot, loadFromSlot, exportToFile, importFromFile, pinSnapshot, branchFromSnapshot, deserialize, type SlotInfo } from '../saves';
+    15→
+    16→const FORM_NAMES_FALLBACK = (f: string): string => FORM_NAMES[f as SocietyForm] ?? f;
+    17→
+    18→let modalOpen = false;
+    19→export function isModalOpen() { return modalOpen; }
+    20→
+    21→export interface PanelActions {
+    22→  focusSettlement: (s: Settlement) => void;
+    23→  castBlessingAt: (s: Settlement) => void;
+    24→  purify: (settlementId: number) => boolean;
+    25→  refreshHud: () => void;
+    26→  loadWorld: (w: WorldState, name: string) => void;
+    27→  toast: (t: string, k?: 'good' | 'bad' | 'neutral', i?: string) => void;
+    28→  playSfx: (name: string, severity?: number) => void;
+    29→}
+    30→
+    31→export function closeModal() {
+    32→  const root = document.getElementById('modal-root')!;
+    33→  root.innerHTML = '';
+    34→  modalOpen = false;
+    35→}
+    36→
+    37→function openModal(html: string, wide = false) {
+    38→  const root = document.getElementById('modal-root')!;
+    39→  root.innerHTML = `
+    40→    <div class="modal-backdrop"></div>
+    41→    <div class="modal ${wide ? 'wide' : ''}">${html}</div>`;
+    42→  modalOpen = true;
+    43→  root.querySelector('.modal-backdrop')!.addEventListener('click', closeModal);
+    44→  const closeBtn = root.querySelector('.modal-close');
+    45→  if (closeBtn) closeBtn.addEventListener('click', closeModal);
+    46→  return root.querySelector('.modal') as HTMLElement;
+    47→}
+    48→
+    49→// ---------- 事件卡 ----------
+    50→
+    51→export function openEventCard(ev: EventRecord, w: WorldState, actions: PanelActions) {
+    52→  const meta = EVENT_ICON[ev.category] ?? EVENT_ICON.harvest;
+    53→  const settlement = ev.settlementId !== undefined ? w.settlements.find(s => s.id === ev.settlementId) : undefined;
+    54→  let actionsHtml = '';
+    55→  if (ev.category === 'famine' && settlement) {
+    56→    actionsHtml = `<button class="btn gold" data-act="bless">${icon('blessing', 15)} 赐下丰产祝福（12⚡）</button>`;
+    57→  }
+    58→  if (ev.category === 'plague' && settlement && w.activeEvents.some(a => a.id === 'plague-outbreak' && a.data.settlementId === settlement.id)) {
+    59→    actionsHtml = `<button class="btn gold" data-act="purify">${icon('sparkle', 15)} 净化疫病（12⚡）</button>`;
+    60→  }
+    61→  if (ev.category === 'ideas' || ev.category === 'institution') {
+    62→    actionsHtml = `<button class="btn" data-act="ideas">${icon('ideas', 15)} 传播组织与平等思想（14⚡）</button>`;
+    63→  }
+    64→  const modal = openModal(`
+    65→    <div class="modal-head">
+    66→      <span class="mh-ic" style="background:${meta.color}">${icon(meta.icon, 18)}</span>
+    67→      <h2>${ev.title}</h2>
+    68→      <button class="modal-close">${icon('close', 16)}</button>
+    69→    </div>
+    70→    <div class="modal-body">
+    71→      <div class="event-card-text">${ev.text}</div>
+    72→      <div class="ce-section">
+    73→        <h5>${icon('chart', 13)} 事件起因（真实模拟变量）</h5>
+    74→        <ul>${ev.causes.map(c => `<li>${c}</li>`).join('')}</ul>
+    75→      </div>
+    76→      <div class="ce-section effects">
+    77→        <h5>${icon('sparkle', 13)} 实际结果</h5>
+    78→        <ul>${ev.effects.map(e => `<li>${e}</li>`).join('')}</ul>
+    79→      </div>
+    80→      <div class="ce-section">
+    81→        <h5>${icon('clock', 13)} 时间地点</h5>
+    82→        <ul><li>第 ${ev.year} 年${settlement ? ` · ${settlement.name}` : ' · 全域'}</li>
+    83→        <li>${ev.intervened ? '神（玩家）介入了此事' : '神选择旁观'}</li></ul>
+    84→      </div>
+    85→      ${actionsHtml ? `<div class="ce-actions">${actionsHtml}<button class="btn" data-act="close">静观其变</button></div>` : ''}
+    86→    </div>`);
+    87→  modal.querySelector('[data-act="close"]')?.addEventListener('click', closeModal);
+    88→  modal.querySelector('[data-act="bless"]')?.addEventListener('click', () => {
+    89→    if (settlement) actions.castBlessingAt(settlement);
+    90→    closeModal();
+    91→  });
+    92→  modal.querySelector('[data-act="purify"]')?.addEventListener('click', () => {
+    93→    if (settlement) actions.purify(settlement.id);
+    94→    closeModal();
+    95→  });
+    96→  modal.querySelector('[data-act="ideas"]')?.addEventListener('click', () => {
+    97→    const def = GOD_POWERS.find(p => p.id === 'ideas')!;
+    98→    if (!canAfford(w, def.cost)) { actions.toast('神力不足', 'bad', 'alert'); return; }
+    99→    castCivPower(w, 'ideas');
+   100→    w.chronicle.push({
+   101→      id: `ev-${w.nextEventId++}`, year: w.year, title: '神力：思想传播',
+   102→      category: 'ideas', text: '平等与组织的观念随神启传遍大地。', causes: ['神（玩家）传播思想'],
+   103→      effects: ['政治参与上升', '平民组织能力上升'], intervened: true, severity: 0.2,
+   104→    });
+   105→    actions.toast('思想已传播', 'good', 'ideas');
+   106→    actions.playSfx('power');
+   107→    actions.refreshHud();
+   108→    closeModal();
+   109→  });
+   110→}
+   111→
+   112→// ---------- 编年史 ----------
+   113→
+   114→export function openChronicle(w: WorldState, actions: PanelActions) {
+   115→  let filter = 'all';
+   116→  const render = () => {
+   117→    const entries = [...w.chronicle].reverse().filter(e => {
+   118→      if (filter === 'all') return true;
+   119→      if (filter === 'major') return e.severity >= 0.5;
+   120→      if (filter === 'god') return e.intervened;
+   121→      if (filter === 'institution') return e.category === 'institution' || e.category === 'politics';
+   122→      return true;
+   123→    });
+   124→    // 时代分组：按形态变迁分段
+   125→    const eras: { label: string; items: ChronicleEntry[] }[] = [];
+   126→    let curForm = w.civ.form;
+   127→    let bucket: ChronicleEntry[] = [];
+   128→    const formNames: Record<string, string> = {
+   129→      primitive: '原始社会', slave: '奴隶制社会', feudal: '封建社会',
+   130→      capitalist: '资本主义社会', socialist: '社会主义社会', collapsed: '文明废墟',
+   131→    };
+   132→    const ordered = [...entries].reverse();
+   133→    for (const e of ordered) {
+   134→      bucket.push(e);
+   135→    }
+   136→    // 简化：直接按年份倒序 + 时代头（用 formSince 推断）
+   137→    eras.push({ label: '全部记录', items: bucket.reverse() });
+   138→    const modal = openModal(`
+   139→      <div class="modal-head">
+   140→        <span class="mh-ic" style="background:#2f7e76">${icon('book', 18)}</span>
+   141→        <h2>历史编年史 · ${w.chronicle.length} 条</h2>
+   142→        <button class="modal-close">${icon('close', 16)}</button>
+   143→      </div>
+   144→      <div class="modal-body">
+   145→        <div class="chron-toolbar">
+   146→          <button data-f="all" class="${filter === 'all' ? 'active' : ''}">全部</button>
+   147→          <button data-f="major" class="${filter === 'major' ? 'active' : ''}">重大</button>
+   148→          <button data-f="institution" class="${filter === 'institution' ? 'active' : ''}">制度变迁</button>
+   149→          <button data-f="god" class="${filter === 'god' ? 'active' : ''}">神迹</button>
+   150→        </div>
+   151→        ${entries.length === 0 ? '<div class="chron-empty">历史尚未开始书写。<br>推进时间，或施加你的第一个神迹。</div>' : ''}
+   152→        ${entries.map(e => {
+   153→          const meta = EVENT_ICON[e.category] ?? EVENT_ICON.harvest;
+   154→          return `<div class="chron-item" data-eid="${e.id}">
+   155→            <div class="c-year">${e.year}</div>
+   156→            <div class="c-ic" style="background:${meta.color}">${icon(meta.icon, 15)}</div>
+   157→            <div class="c-main">
+   158→              <div class="c-title">${e.title}${e.intervened ? '<span class="intervened">神迹</span>' : ''}</div>
+   159→              <div class="c-text">${e.text.length > 66 ? e.text.slice(0, 66) + '…' : e.text}</div>
+   160→            </div>
+   161→          </div>`;
+   162→        }).join('')}
+   163→      </div>`, true);
+   164→    modal.querySelectorAll('.chron-toolbar button').forEach(b => {
+   165→      b.addEventListener('click', () => {
+   166→        filter = (b as HTMLElement).dataset.f!;
+   167→        render();
+   168→      });
+   169→    });
+   170→    modal.querySelectorAll('.chron-item').forEach(el => {
+   171→      el.addEventListener('click', () => {
+   172→        const e = w.chronicle.find(x => x.id === (el as HTMLElement).dataset.eid);
+   173→        if (e) openEventCard(e, w, actions);
+   174→      });
+   175→    });
+   176→  };
+   177→  render();
+   178→}
+   179→
+   180→// ---------- 观察者 ----------
+   181→
+   182→function drawLineChart(canvas: HTMLCanvasElement, data: { year: number; v: number }[], color: string, min?: number, max?: number, ref1?: number) {
+   183→  const ctx = canvas.getContext('2d')!;
+   184→  const W = canvas.width = canvas.clientWidth * 2 || 600;
+   185→  const H = canvas.height = 220;
+   186→  ctx.scale(1, 1);
+   187→  ctx.clearRect(0, 0, W, H);
+   188→  if (data.length < 2) {
+   189→    ctx.fillStyle = 'rgba(107,97,84,0.5)';
+   190→    ctx.font = '22px sans-serif';
+   191→    ctx.textAlign = 'center';
+   192→    ctx.fillText('数据不足（推进时间以采集）', W / 2, H / 2);
+   193→    return;
+   194→  }
+   195→  const vs = data.map(d => d.v);
+   196→  const lo = min ?? Math.min(...vs) * 0.95;
+   197→  const hi = max ?? Math.max(...vs) * 1.05;
+   198→  const x0 = 40, x1 = W - 14, y0 = 18, y1 = H - 26;
+   199→  const px = (i: number) => x0 + (i / (data.length - 1)) * (x1 - x0);
+   200→  const py = (v: number) => y1 - ((v - lo) / Math.max(0.0001, hi - lo)) * (y1 - y0);
+   201→  // 网格
+   202→  ctx.strokeStyle = 'rgba(59,49,40,0.09)';
+   203→  ctx.lineWidth = 1;
+   204→  for (let i = 0; i <= 3; i++) {
+   205→    const y = y0 + (i / 3) * (y1 - y0);
+   206→    ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x1, y); ctx.stroke();
+   207→  }
+   208→  if (ref1 !== undefined) {
+   209→    ctx.strokeStyle = 'rgba(180,85,45,0.5)';
+   210→    ctx.setLineDash([5, 5]);
+   211→    ctx.beginPath(); ctx.moveTo(x0, py(ref1)); ctx.lineTo(x1, py(ref1)); ctx.stroke();
+   212→    ctx.setLineDash([]);
+   213→  }
+   214→  // 面积
+   215→  ctx.beginPath();
+   216→  ctx.moveTo(px(0), py(vs[0]));
+   217→  vs.forEach((v, i) => ctx.lineTo(px(i), py(v)));
+   218→  ctx.lineTo(px(vs.length - 1), y1);
+   219→  ctx.lineTo(px(0), y1);
+   220→  ctx.closePath();
+   221→  ctx.fillStyle = color.replace(')', ',0.13)').replace('rgb', 'rgba');
+   222→  ctx.fill();
+   223→  // 线
+   224→  ctx.beginPath();
+   225→  vs.forEach((v, i) => i === 0 ? ctx.moveTo(px(0), py(v)) : ctx.lineTo(px(i), py(v)));
+   226→  ctx.strokeStyle = color;
+   227→  ctx.lineWidth = 3;
+   228→  ctx.stroke();
+   229→  // 首尾年份
+   230→  ctx.fillStyle = 'rgba(107,97,84,0.85)';
+   231→  ctx.font = '20px sans-serif';
+   232→  ctx.textAlign = 'left';
+   233→  ctx.fillText(`${data[0].year}`, x0, H - 6);
+   234→  ctx.textAlign = 'right';
+   235→  ctx.fillText(`${data[data.length - 1].year}`, x1, H - 6);
+   236→  ctx.fillText(`${vs[vs.length - 1]}`, x1, y0 + 6);
+   237→}
+   238→
+   239→function drawStackChart(canvas: HTMLCanvasElement, data: { year: number; elite: number }[]) {
+   240→  const ctx = canvas.getContext('2d')!;
+   241→  const W = canvas.width = canvas.clientWidth * 2 || 600;
+   242→  const H = canvas.height = 220;
+   243→  ctx.clearRect(0, 0, W, H);
+   244→  if (data.length < 2) {
+   245→    ctx.fillStyle = 'rgba(107,97,84,0.5)';
+   246→    ctx.font = '22px sans-serif'; ctx.textAlign = 'center';
+   247→    ctx.fillText('数据不足', W / 2, H / 2);
+   248→    return;
+   249→  }
+   250→  const x0 = 40, x1 = W - 14, y0 = 18, y1 = H - 26;
+   251→  const px = (i: number) => x0 + (i / (data.length - 1)) * (x1 - x0);
+   252→  const barW = Math.max(4, (x1 - x0) / data.length * 0.8);
+   253→  for (let i = 0; i < data.length; i++) {
+   254→    const e = data[i].elite;
+   255→    const mid = Math.max(0.05, 1 - e - 0.35);
+   256→    const common = Math.max(0, 1 - e - mid);
+   257→    const ye = y1 - e * (y1 - y0);
+   258→    const ym = ye - mid * (y1 - y0);
+   259→    ctx.fillStyle = '#c9a227';
+   260→    ctx.fillRect(px(i) - barW / 2, ye, barW, y1 - ye);
+   261→    ctx.fillStyle = '#7a8a9a';
+   262→    ctx.fillRect(px(i) - barW / 2, ym, barW, ye - ym);
+   263→    ctx.fillStyle = '#5d8a6a';
+   264→    ctx.fillRect(px(i) - barW / 2, ym - common * (y1 - y0), barW, common * (y1 - y0));
+   265→  }
+   266→  ctx.fillStyle = 'rgba(107,97,84,0.85)';
+   267→  ctx.font = '20px sans-serif';
+   268→  ctx.textAlign = 'left';
+   269→  ctx.fillText('财富分配：金=精英 灰=中间 绿=平民', x0, y0 + 4);
+   270→}
+   271→
+   272→export function openObserver(w: WorldState) {
+   273→  const v = w.civ.vars;
+   274→  const macro = macroEconomy(w);
+   275→  const cls = classifySociety(w);
+   276→  const varRows: [string, number, string][] = [
+   277→    ['粮食保障率', macro.foodRatio, '#5d8a6a'],
+   278→    ['存粮（人·年）', macro.foodStock / Math.max(1, macro.population), '#8aa05d'],
+   279→    ['城市化率', macro.urbanization, '#7a8a9a'],
+   280→    ['住房覆盖', macro.housingRatio, '#a0862d'],
+   281→    ['共有制', v.ownCommon, '#5d8a6a'],
+   282→    ['私有制', v.ownPrivate, '#c9a227'],
+   283→    ['公有制', v.ownPublic, '#2f7e76'],
+   284→    ['强制劳动', v.laborForced, '#b4552d'],
+   285→    ['依附劳动', v.laborBonded, '#a0762d'],
+   286→    ['雇佣劳动', v.laborWage, '#7a8a9a'],
+   287→    ['合作劳动', v.laborCoop, '#2f7e76'],
+   288→    ['土地集中', v.landConcentration, '#b4552d'],
+   289→    ['市场发育', v.market, '#c9a227'],
+   290→    ['国家能力', v.stateCapacity, '#5a6a8a'],
+   291→    ['公共服务', v.publicServices, '#2f7e76'],
+   292→    ['教育水平', v.education, '#4a7a9a'],
+   293→    ['分工度', v.specialization, '#7a6a4a'],
+   294→    ['政治参与', v.participation, '#4a7a9a'],
+   295→    ['制度信任', v.trust, '#5d8a6a'],
+   296→    ['冲突风险', v.unrest, '#b4552d'],
+   297→    ['环境质量', v.environment, '#5d8a6a'],
+   298→    ['资源压力', v.resourcePressure, '#b4552d'],
+   299→    ['精英组织力', v.orgElite, '#c9a227'],
+   300→    ['平民组织力', v.orgCommon, '#5d8a6a'],
+   301→  ];
+   302→  const formScores = (Object.entries(cls.scores) as [string, number][]).filter(([k]) => k !== 'collapsed');
+   303→  const maxScore = Math.max(0.001, ...formScores.map(([, x]) => x));
+   304→
+   305→  const modal = openModal(`
+   306→    <div class="modal-head">
+   307→      <span class="mh-ic" style="background:#2f7e76">${icon('chart', 18)}</span>
+   308→      <h2>观察者 · 社会实验数据</h2>
+   309→      <button class="modal-close">${icon('close', 16)}</button>
+   310→    </div>
+   311→    <div class="modal-body">
+   312→      <div class="obs-grid">
+   313→        <div class="obs-chart"><h5>人口</h5><canvas id="obs-pop"></canvas></div>
+   314→        <div class="obs-chart"><h5>粮食保障率（红线=100%）</h5><canvas id="obs-food"></canvas></div>
+   315→        <div class="obs-chart"><h5>冲突风险</h5><canvas id="obs-unrest"></canvas></div>
+   316→        <div class="obs-chart"><h5>财富分配结构</h5><canvas id="obs-wealth"></canvas></div>
+   317→        <div class="obs-chart obs-vars">
+   318→          <h5>当前社会变量（第 ${w.year} 年）</h5>
+   319→          ${varRows.map(([n, val, c]) => `
+   320→            <div class="obs-var-row">
+   321→              <span class="n">${n}</span>
+   322→              <div class="track"><div class="fill" style="width:${Math.min(100, Math.max(2, (n.includes('保障') || n.includes('存粮')) ? val * 55 : val * 100))}%;background:${c}"></div></div>
+   323→              <span class="v">${n.includes('保障') ? Math.round(val * 100) + '%' : n.includes('存粮') ? val.toFixed(1) : Math.round(val * 100) + '%'}</span>
+   324→            </div>`).join('')}
+   325→        </div>
+   326→        <div class="obs-chart">
+   327→          <h5>社会形态评分</h5>
+   328→          ${formScores.map(([k, s]) => `
+   329→            <div class="obs-var-row">
+   330→              <span class="n">${FORM_NAMES_FALLBACK(k)}</span>
+   331→              <div class="track"><div class="fill" style="width:${Math.max(3, s / maxScore * 100)}%;background:${k === cls.form ? '#c9a227' : '#8a8070'}"></div></div>
+   332→              <span class="v">${s.toFixed(2)}</span>
+   333→            </div>`).join('')}
+   334→          <div style="font-size:11.5px;color:var(--ink-soft);margin-top:8px">判定：${formLabel(cls)}（自第 ${w.civ.formSince} 年起）</div>
+   335→        </div>
+   336→        <div class="obs-chart">
+   337→          <h5>技术水平</h5>
+   338→          <div style="font-size:12.5px;line-height:2">${techSummary(w)}</div>
+   339→          <div style="font-size:11.5px;color:var(--ink-soft)">知识点累计 ${Math.round(w.civ.tech.points)} · 启蒙思潮 ${(w.civ.enlightenment * 100).toFixed(0)}%</div>
+   340→        </div>
+   341→      </div>
+   342→    </div>`, true);
+   343→
+   344→  const hist = w.history;
+   345→  if (hist.length) {
+   346→    drawLineChart(modal.querySelector('#obs-pop')!, hist.map(h => ({ year: h.year, v: h.pop })), 'rgb(93,138,106)', 0);
+   347→    drawLineChart(modal.querySelector('#obs-food')!, hist.map(h => ({ year: h.year, v: h.food })), 'rgb(192,162,39)', 0, 2, 1);
+   348→    drawLineChart(modal.querySelector('#obs-unrest')!, hist.map(h => ({ year: h.year, v: h.unrest })), 'rgb(180,85,45)', 0, 1, 0.52);
+   349→    drawStackChart(modal.querySelector('#obs-wealth')!, hist.map(h => ({ year: h.year, elite: h.elite })));
+   350→  } else {
+   351→    for (const id of ['obs-pop', 'obs-food', 'obs-unrest', 'obs-wealth']) {
+   352→      const cv = modal.querySelector(`#${id}`) as HTMLCanvasElement;
+   353→      const ctx = cv.getContext('2d')!;
+   354→      cv.width = 600; cv.height = 220;
+   355→      ctx.fillStyle = 'rgba(107,97,84,0.5)';
+   356→      ctx.font = '22px sans-serif'; ctx.textAlign = 'center';
+   357→      ctx.fillText('数据不足（推进时间以采集）', 300, 110);
+   358→    }
+   359→  }
+   360→}
+   361→
+   362→// ---------- 社会形态卡 ----------
+   363→
+   364→export function openFormCard(w: WorldState) {
+   365→  const cls = classifySociety(w);
+   366→  const v = w.civ.vars;
+   367→  const desc: Record<string, string> = {
+   368→    primitive: '人们以亲缘结成小共同体，共同劳动、平均分享。土地与工具属于所有成员。剩余产品稀少，社会规模受生态直接约束。',
+   369→    slave: '一部分人被强制为他人劳动。社会已能生产剩余，权力机构开始系统地服务于有产者。强制劳动带来产出，也埋下反抗的种子。',
+   370→    feudal: '土地是财富的根本。耕种者以人身依附换取生存，等级与义务构成社会的骨架。城镇与商业在缝隙中生长。',
+   371→    capitalist: '市场与雇佣重塑了生产。资本积累、技术创新与周期波动并存；财富在竞争中集中，也在冲突中被重新分配。',
+   372→    socialist: '生产资料转入公共与合作之手。分配规则、公共服务与社会参与被重新设计；治理效率与创新激励是持久的考验。',
+   373→    collapsed: '聚落人口清零，文明归于寂静。但它留下的废墟仍在讲述往事。',
+   374→  };
+   375→  openModal(`
+   376→    <div class="modal-head">
+   377→      <span class="mh-ic" style="background:#c9a227">${icon('branch', 18)}</span>
+   378→      <h2>社会形态 · ${formLabel(cls)}</h2>
+   379→      <button class="modal-close">${icon('close', 16)}</button>
+   380→    </div>
+   381→    <div class="modal-body">
+   382→      <div class="event-card-text">${desc[cls.form]}</div>
+   383→      <div class="ce-section"><h5>判定依据</h5><ul>${cls.causes.map(c => `<li>${c}</li>`).join('')}</ul></div>
+   384→      <div class="ce-section effects"><h5>制度结构</h5>
+   385→        <ul>
+   386→          <li>所有制：共有 ${Math.round(v.ownCommon * 100)}% · 私有 ${Math.round(v.ownPrivate * 100)}% · 公有 ${Math.round(v.ownPublic * 100)}%</li>
+   387→          <li>劳动关系：强制 ${Math.round(v.laborForced * 100)}% · 依附 ${Math.round(v.laborBonded * 100)}% · 雇佣 ${Math.round(v.laborWage * 100)}% · 合作 ${Math.round(v.laborCoop * 100)}%</li>
+   388→          <li>自第 ${w.civ.formSince} 年进入此形态${w.civ.prevForm ? `（此前：${FORM_NAMES_FALLBACK(w.civ.prevForm)}）` : ''}</li>
+   389→        </ul>
+   390→      </div>
+   391→    </div>`);
+   392→}
+   393→
+   394→// ---------- 存档面板 ----------
+   395→
+   396→export function openSaveMenu(w: WorldState, worldName: string, actions: PanelActions) {
+   397→  const render = () => {
+   398→    const slots = listSlots();
+   399→    const slotEls = [1, 2, 3, 4, 5, 6].map(i => {
+   400→      const s = slots.find(x => x.index === i);
+   401→      return `<div class="slot-item ${s ? 'filled' : ''}" data-slot="${i}">
+   402→        <span class="si-ic" style="color:${s ? 'var(--teal)' : 'var(--ink-soft)'}">${icon(s ? 'save' : 'load', 18)}</span>
+   403→        <div class="si-main">
+   404→          <div class="si-name">槽位 ${i}${s ? ` · ${s.worldName}` : ' · 空'}</div>
+   405→          <div class="si-meta">${s ? `第 ${s.year} 年 · ${FORM_NAMES_FALLBACK(s.form)} · ${new Date(s.savedAt).toLocaleString('zh-CN')}` : '点击存入当前世界'}</div>
+   406→        </div>
+   407→        ${s ? `<button class="btn small" data-load="${i}">读取</button>` : ''}
+   408→      </div>`;
+   409→    }).join('');
+   410→    const snaps = w.snapshots.map((s, i) => `
+   411→      <div class="snapshot-row">
+   412→        <span class="s-ic ${s.data ? 'has-data' : ''}">${icon(s.data ? 'pin' : 'clock', 15)}</span>
+   413→        <div class="s-main">${s.label}${s.data ? ' <span style="color:var(--gold);font-size:11px">◆ 可分支</span>' : ''}</div>
+   414→        ${s.data ? `<button class="btn small" data-branch="${i}">从此分支</button>` : ''}
+   415→      </div>`).join('');
+   416→    const modal = openModal(`
+   417→      <div class="modal-head">
+   418→        <span class="mh-ic" style="background:#5a6a8a">${icon('save', 18)}</span>
+   419→        <h2>保存 · 读取 · 分支</h2>
+   420→        <button class="modal-close">${icon('close', 16)}</button>
+   421→      </div>
+   422→      <div class="modal-body">
+   423→        <div style="display:flex;gap:10px;margin-bottom:14px;flex-wrap:wrap">
+   424→          <button class="btn primary" id="snap-pin">${icon('pin', 15)} 在此记录分支节点</button>
+   425→          <button class="btn" id="save-export">${icon('load', 15)} 导出为文件</button>
+   426→          <label class="btn" style="cursor:pointer">${icon('save', 15)} 导入存档文件
+   427→            <input type="file" id="save-import" accept=".json" style="display:none">
+   428→          </label>
+   429→          <button class="btn" id="save-autosave" ${localStorage.getItem('society-lab-save-v1-auto') ? '' : 'disabled'}>读取自动存档</button>
+   430→        </div>
+   431→        <div class="slot-list">${slotEls}</div>
+   432→        <h5 style="margin:18px 0 8px;font-size:12.5px;color:var(--ink-soft)">历史节点（每 25 年自动记录 · ◆ 可创建平行世界）</h5>
+   433→        ${snaps || '<div class="chron-empty">暂无快照</div>'}
+   434→      </div>`, true);
+   435→    modal.querySelectorAll('.slot-item').forEach(el => {
+   436→      el.addEventListener('click', () => {
+   437→        const i = Number((el as HTMLElement).dataset.slot);
+   438→        if (saveToSlot(w, worldName, i)) {
+   439→          actions.toast(`已存入槽位 ${i}`, 'good', 'save');
+   440→          actions.playSfx('click');
+   441→          render();
+   442→        } else actions.toast('存档失败（空间不足？）', 'bad', 'alert');
+   443→      });
+   444→    });
+   445→    modal.querySelectorAll('[data-load]').forEach(b => {
+   446→      b.addEventListener('click', e => {
+   447→        e.stopPropagation();
+   448→        const res = loadFromSlot(Number((b as HTMLElement).dataset.load));
+   449→        if (res && 'world' in res) {
+   450→          actions.loadWorld(res.world, res.worldName);
+   451→          closeModal();
+   452→          actions.toast('世界已读取', 'good', 'load');
+   453→        } else {
+   454→          actions.toast((res as any).error ?? '读取失败', 'bad', 'alert');
+   455→        }
+   456→      });
+   457→    });
+   458→    modal.querySelectorAll('[data-branch]').forEach(b => {
+   459→      b.addEventListener('click', () => {
+   460→        const res = branchFromSnapshot(w, Number((b as HTMLElement).dataset.branch));
+   461→        if (res && 'world' in res) {
+   462→          actions.loadWorld(res.world, res.worldName);
+   463→          closeModal();
+   464→          actions.toast('已创建平行历史分支', 'good', 'branch');
+   465→        } else {
+   466→          actions.toast((res as any).error ?? '无法分支', 'bad', 'alert');
+   467→        }
+   468→      });
+   469→    });
+   470→    modal.querySelector('#snap-pin')!.addEventListener('click', () => {
+   471→      pinSnapshot(w, `${w.year} 年 · 手动节点`);
+   472→      actions.toast('分支节点已记录', 'good', 'pin');
+   473→      render();
+   474→    });
+   475→    modal.querySelector('#save-export')!.addEventListener('click', () => {
+   476→      exportToFile(w, worldName);
+   477→      actions.toast('已导出存档文件', 'good', 'save');
+   478→    });
+   479→    modal.querySelector('#save-import')!.addEventListener('change', async e => {
+   480→      const file = (e.target as HTMLInputElement).files?.[0];
+   481→      if (!file) return;
+   482→      const res = await importFromFile(file);
+   483→      if ('world' in res) {
+   484→        actions.loadWorld(res.world, res.worldName);
+   485→        closeModal();
+   486→        actions.toast('存档已导入', 'good', 'load');
+   487→      } else actions.toast(res.error, 'bad', 'alert');
+   488→    });
+   489→    modal.querySelector('#save-autosave')!.addEventListener('click', () => {
+   490→      const raw = localStorage.getItem('society-lab-save-v1-auto');
+   491→      if (!raw) return;
+   492→      const d = deserialize(raw);
+   493→      if ('world' in d) {
+   494→        actions.loadWorld(d.world, d.worldName);
+   495→        closeModal();
+   496→        actions.toast('自动存档已读取', 'good', 'load');
+   497→      }
+   498→    });
+   499→  };
+   500→  render();
+   501→}
+   502→
+   503→// ---------- 帮助 ----------
+   504→
+   505→export function openHelp() {
+   506→  openModal(`
+   507→    <div class="modal-head">
+   508→      <span class="mh-ic" style="background:#2f7e76">${icon('help', 18)}</span>
+   509→      <h2>操作指南</h2>
+   510→      <button class="modal-close">${icon('close', 16)}</button>
+   511→    </div>
+   512→    <div class="modal-body">
+   513→      <div class="help-cols">
+   514→        <div class="help-col">
+   515→          <h5>目标</h5>
+   516→          <p>你是这个世界的神。观察文明生长，或在关键时刻施加神力——让历史走向不同的岔路。</p>
+   517→          <h5>摄像机</h5>
+   518→          <ul>
+   519→            <li>拖拽：移动视角</li>
+   520→            <li>滚轮：缩放（0.4×–2.6×）</li>
+   521→            <li><kbd>H</kbd>：回到全景 · 点击聚落名可聚焦</li>
+   522→            <li>右下角小地图：点击跳转</li>
+   523→          </ul>
+   524→          <h5>时间</h5>
+   525→          <ul>
+   526→            <li><kbd>空格</kbd> 暂停/继续 · <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> 调速</li>
+   527→            <li>暂停时可单步推进（⏭ 按钮）</li>
+   528→          </ul>
+   529→          <h5>神力</h5>
+   530→          <ul>
+   531→            <li>左侧选择神力 → 地图上点击施放</li>
+   532→            <li>笔刷大小：小/中/大</li>
+   533→            <li><kbd>Esc</kbd> 或右键取消神力</li>
+   534→            <li>有限干预模式下消耗神力能量（每年恢复）</li>
+   535→          </ul>
+   536→        </div>
+   537→        <div class="help-col">
+   538→          <h5>检视</h5>
+   539→          <ul>
+   540→            <li>检视模式点击聚落：查看人口/建筑/粮储</li>
+   541→            <li>事件卡显示起因（真实变量）与结果</li>
+   542→            <li><kbd>C</kbd> 编年史 · <kbd>O</kbd> 观察者数据 · <kbd>S</kbd> 存档</li>
+   543→          </ul>
+   544→          <h5>社会如何演化</h5>
+   545→          <ul>
+   546→            <li>食物盈余 → 人口增长、分工、财富分化</li>
+   547→            <li>土地集中 + 依附劳动 → 封建倾向</li>
+   548→            <li>战争俘虏 → 强制劳动 → 奴隶制倾向</li>
+   549→            <li>市场 + 工业 → 雇佣劳动 → 资本主义</li>
+   550→            <li>组织 + 思想 + 公共性 → 社会主义</li>
+   551→            <li>没有必然路线——不同条件走向不同历史</li>
+   552→          </ul>
+   553→          <h5>实验</h5>
+   554→          <ul>
+   555→            <li>存档面板可记录分支节点</li>
+   556→            <li>从任一节点创建平行世界，比较两条历史</li>
+   557→          </ul>
+   558→        </div>
+   559→      </div>
+   560→    </div>`);
+   561→}
+   562→
+   563→// ---------- 右侧详情面板 ----------
+   564→
+   565→export function showSettlementPanel(sidepanel: HTMLElement, w: WorldState, s: Settlement, actions: PanelActions) {
+   566→  const housing = housingCapacity(s);
+   567→  const macro = macroEconomy(w);
+   568→  const counts = new Map<string, number>();
+   569→  for (const b of s.buildings) counts.set(b.kind, (counts.get(b.kind) ?? 0) + 1);
+   570→  sidepanel.innerHTML = `
+   571→    <h3>${icon('people', 17)} ${s.name}</h3>
+   572→    <div class="sub">${STAGE_NAMES[s.stage]} · 建立于第 ${s.founded} 年 · ${s.dead ? '已废弃' : '发展中'}</div>
+   573→    <div class="sp-section">
+   574→      <h5>人口与生存</h5>
+   575→      <div class="kv"><span class="k">人口</span><span class="v">${s.population}</span></div>
+   576→      <div class="kv"><span class="k">住房</span><span class="v">${housing} / ${s.population}${housing < s.population ? ' ⚠' : ''}</span></div>
+   577→      <div class="kv"><span class="k">粮储（人·年）</span><span class="v">${Math.round(s.food)}</span></div>
+   578→      <div class="kv"><span class="k">短缺年数</span><span class="v">${s.shortageYears}</span></div>
+   579→      <div class="kv"><span class="k">木材 / 石 / 金属</span><span class="v">${Math.round(s.wood)} / ${Math.round(s.stone)} / ${Math.round(s.metal)}</span></div>
+   580→    </div>
+   581→    <div class="sp-section">
+   582→      <h5>建筑（${s.buildings.length}）</h5>
+   583→      ${s.buildings.length === 0 ? '<div class="kv"><span class="k">暂无</span></div>' : ''}
+   584→      ${[...counts.entries()].map(([k, n]) => `<span class="building-chip">${BUILDINGS[k]?.name ?? k} ×${n}</span>`).join('')}
+   585→      ${s.construction.length ? `<div class="kv" style="margin-top:6px"><span class="k">在建</span><span class="v">${s.construction.map(b => BUILDINGS[b.kind]?.name ?? b.kind).join('、')}</span></div>` : ''}
+   586→    </div>
+   587→    <div class="sp-section">
+   588→      <h5>当前危机</h5>
+   589→      ${s.shortageYears > 0 ? '<div class="kv"><span class="k">⚠ 口粮短缺</span><span class="v">连续 ' + s.shortageYears + ' 年</span></div>' : ''}
+   590→      ${w.activeEvents.some(a => a.id === 'plague-outbreak' && a.data.settlementId === s.id) ? '<div class="kv"><span class="k">⚠ 疫病流行中</span><span class="v">可净化</span></div>' : ''}
+   591→      ${s.shortageYears === 0 && !w.activeEvents.some(a => a.id === 'plague-outbreak' && a.data.settlementId === s.id) ? '<div class="kv"><span class="k">（暂无）</span></div>' : ''}
+   592→    </div>
+   593→    <div class="sp-section">
+   594→      <h5>宏观对照</h5>
+   595→      <div class="kv"><span class="k">全域人口</span><span class="v">${macro.population}</span></div>
+   596→      <div class="kv"><span class="k">粮食保障</span><span class="v">${Math.round(macro.foodRatio * 100)}%</span></div>
+   597→    </div>
+   598→    <div class="sp-actions">
+   599→      <button class="btn small primary" id="sp-focus">${icon('focus', 13)} 聚焦</button>
+   600→      <button class="btn small gold" id="sp-bless" title="12⚡">${icon('blessing', 13)} 祝福</button>
+   601→      <button class="btn small" id="sp-close">${icon('close', 13)} 关闭</button>
+   602→    </div>`;
+   603→  sidepanel.classList.remove('hidden');
+   604→  sidepanel.querySelector('#sp-focus')!.addEventListener('click', () => actions.focusSettlement(s));
+   605→  sidepanel.querySelector('#sp-bless')!.addEventListener('click', () => actions.castBlessingAt(s));
+   606→  sidepanel.querySelector('#sp-close')!.addEventListener('click', () => sidepanel.classList.add('hidden'));
+   607→}
+   608→
+   609→export function hideSettlementPanel(sidepanel: HTMLElement) {
+   610→  sidepanel.classList.add('hidden');
+   611→}
+   612→
+   613→export function updateEventFeed(feed: HTMLElement, w: WorldState, actions: PanelActions, lastSeen: number) {
+   614→  const recent = w.chronicle.slice(-6).reverse();
+   615→  feed.innerHTML = recent.map(e => {
+   616→    const meta = EVENT_ICON[e.category] ?? EVENT_ICON.harvest;
+   617→    return `<div class="feed-card" data-eid="${e.id}" style="${e.year < lastSeen ? 'opacity:0.6' : ''}">
+   618→      <div class="f-ic" style="background:${meta.color}22;color:${meta.color}">${icon(meta.icon, 15)}</div>
+   619→      <div class="f-body">
+   620→        <div class="f-title">${e.title}</div>
+   621→        <div class="f-meta">第 ${e.year} 年${e.intervened ? ' · 神迹' : ''}</div>
+   622→      </div>
+   623→    </div>`;
+   624→  }).join('');
+   625→  feed.querySelectorAll('.feed-card').forEach(el => {
+   626→    el.addEventListener('click', () => {
+   627→      const e = w.chronicle.find(x => x.id === (el as HTMLElement).dataset.eid);
+   628→      if (e) openEventCard(e, w, actions);
+   629→    });
+   630→  });
+   631→}
+   632→

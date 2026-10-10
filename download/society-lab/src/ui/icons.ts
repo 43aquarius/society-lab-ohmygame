@@ -41,6 +41,17 @@ export const ICONS: Record<string, string> = {
   mute: I('<path d="M11 5L6 9H3v6h3l5 4z"/><path d="M22 9l-6 6M16 9l6 6"/>'),
   sound: I('<path d="M11 5L6 9H3v6h3l5 4z"/><path d="M15.5 8.5a5 5 0 0 1 0 7M18.5 5.5a9 9 0 0 1 0 13"/>'),
   help: I('<circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.8.4-1 .9-1 1.7"/><path d="M12 17v.1"/>'),
+  // —— v2.0 新神力 ——
+  meadow: I('<path d="M3 20c2-6 5-8 9-8s7 2 9 8"/><path d="M12 12V7"/><path d="M12 7c-1.5-1.5-1.5-3 0-4.5 1.5 1.5 1.5 3 0 4.5z"/>'),
+  uplift: I('<path d="M3 19l6.5-12 4 7 2-3.5L21 19z"/><path d="M12 22v-6M8 22l1-2M16 22l-1-2"/>'),
+  meteor: I('<circle cx="15" cy="15" r="4.5"/><path d="M3 3l7 7M6 2l5 5M2 6l5 5"/>'),
+  storm: I('<path d="M17 9a5 5 0 0 0-9.8-1.5A4 4 0 7 8 15h9a3 3 0 0 0 0-6z" transform="translate(-1 -1)"/><path d="M12 15l-2 4h3l-2 4"/>'),
+  wildfire: I('<path d="M12 22c-4 0-6-3-6-6 0-4 3-6 4-9 2 2 2 3.5 1.5 5C13 11 15 12 15 15c0 4-1 7-3 7z"/><path d="M12 22c-1.8 0-3-1.4-3-3 0-2 1.4-3 2-4.5.9 1.2 2 2 2 4.5 0 1.6-.4 3-1 3z"/>'),
+  pestilence: I('<circle cx="12" cy="12" r="3"/><path d="M12 3a4.5 4.5 0 0 0-4.5 4.5c-2 .5-3.5 2-3.5 4s1.5 3.5 3.5 4A4.5 4.5 0 0 0 12 21a4.5 4.5 0 0 0 4.5-5.5c2-.5 3.5-2 3.5-4s-1.5-3.5-3.5-4A4.5 4.5 0 0 0 12 3z"/><path d="M12 9v6M9 12h6"/>'),
+  heal: I('<path d="M12 4v16M4 12h16"/><path d="M12 2a8 8 0 0 1 4 15 8 8 0 0 1-8 0A8 8 0 0 1 12 2z" opacity="0.4"/>'),
+  found: I('<path d="M5 21V9l7-5 7 5v12"/><path d="M9 21v-6h6v6M3 21h18"/>'),
+  'chevron-left': I('<path d="M14 6l-6 6 6 6"/>'),
+  'chevron-right': I('<path d="M10 6l6 6-6 6"/>'),
 };
 
 export function icon(name: string, size = 20): string {

@@ -89,6 +89,14 @@ export enum BuildingKind {
   Factory = 'factory',
   Cooperative = 'cooperative',
   Services = 'services',
+  // v2.0 时代建筑：让每个社会形态拥有属于它的物质形态
+  Temple = 'temple',      // 神庙：早期国家的合法性中枢（奴隶/早期王国）
+  Manor = 'manor',         // 庄园：封建土地贵族的居所
+  Castle = 'castle',       // 城堡：封建军事与行政中心
+  Academy = 'academy',     // 学堂：文教设施
+  Bank = 'bank',           // 银行：资本主义金融中枢
+  Theater = 'theater',     // 剧场：市民文化生活
+  Hospital = 'hospital',   // 医院：现代公共卫生
 }
 
 export interface BuildingDef {
@@ -122,10 +130,19 @@ export type SettlementStage = 'camp' | 'hamlet' | 'village' | 'town' | 'city';
 
 export const STAGE_NAMES: Record<SettlementStage, string> = {
   camp: '营地',
-  hamlet: '小村',
+  hamlet: '村落',
   village: '村庄',
   town: '城镇',
   city: '城市',
+};
+
+/** 聚落阶段的形容词后缀（命名用，随阶段升级而演进） */
+export const STAGE_SUFFIXES: Record<SettlementStage, string[]> = {
+  camp: ['部落', '寨'],
+  hamlet: ['村', '屯', '庄'],
+  village: ['村', '庄'],
+  town: ['镇', '城'],
+  city: ['城', '都'],
 };
 
 export interface Settlement {
@@ -295,11 +312,10 @@ export interface ChronicleEntry extends EventRecord {
 }
 
 export type GodPowerId =
-  | 'forest' | 'fertile' | 'water' | 'ore'
+  | 'forest' | 'fertile' | 'water' | 'ore' | 'meadow' | 'uplift'
   | 'rain' | 'drought'
-  | 'blessing'
-  | 'enlighten'
-  | 'ideas';
+  | 'meteor' | 'storm' | 'wildfire' | 'pestilence'
+  | 'blessing' | 'enlighten' | 'ideas' | 'heal' | 'found';
 
 export type PlayMode = 'free' | 'limited';
 

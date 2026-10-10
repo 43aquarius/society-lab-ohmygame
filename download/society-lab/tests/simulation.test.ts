@@ -65,13 +65,13 @@ test('时间推进改变人口与资源状态', () => {
 test('粮食持续短缺触发饥荒事件并推高冲突风险', () => {
   const w = world(31337, 'dawn');
   for (let i = 0; i < 10; i++) tickYear(w);
-  // 清空粮储并强制造氏（连续干旱）
+  // 持续干旱（每 4 年补施一次，天气效果 5 年后自然消退）+ 清空粮储
   const s = w.settlements[0];
   const beforeUnrest = w.civ.vars.unrest;
-  for (let round = 0; round < 3; round++) {
+  for (let round = 0; round < 5; round++) {
     castBrushPower(w, 'drought', s.x, s.y, 3);
     s.food = 0;
-    for (let i = 0; i < 6; i++) {
+    for (let i = 0; i < 4; i++) {
       s.food = Math.min(s.food, 1);
       tickYear(w);
     }
@@ -83,8 +83,7 @@ test('粮食持续短缺触发饥荒事件并推高冲突风险', () => {
     '饥荒应推高冲突风险或造成人口损失');
 });
 
-test('社会识别器：五种形态都能被正确识别', () => {
-  const base = world(2024, 'valley');
+test('社会识别器：五种形态都能被正确识别（v2.0 硬性前置）', () => {
   const set = (patch: (w: WorldState) => void) => {
     const w = world(2024, 'valley');
     patch(w);
@@ -100,44 +99,59 @@ test('社会识别器：五种形态都能被正确识别', () => {
   });
   assert.equal(prim.form, 'primitive');
 
-  // 奴隶制：强制劳动 + 国家能力
+  // 奴隶制：强制劳动 + 国家能力 + 农业剩余 + 村庄规模 + 农耕 4 级
   const slave = set(w => {
     const v = w.civ.vars;
     v.laborForced = 0.55; v.laborBonded = 0.1; v.laborWage = 0.1; v.laborCoop = 0.1;
     v.market = 0.1; v.stateCapacity = 0.5;
     v.ownCommon = 0.35; v.ownPrivate = 0.6; v.ownPublic = 0.05;
-    w.civ.tech.levels.agriculture = 3;
+    w.civ.tech.levels.agriculture = 4;
     w.civ.tech.progress.agriculture = 999;
+    w.settlements[0].population = 200;
+    w.settlements[0].stage = 'village';
+    // 丰饶之地：产出翻倍，制造真实剩余（surplusRatio > 1.1）
+    w.settlements[0].effects.push({ kind: 'blessing', years: 99, power: 1.2 });
   });
   assert.equal(slave.form, 'slave', `实际=${slave.form}`);
 
-  // 封建：土地集中 + 依附劳动
+  // 封建：土地集中 + 依附劳动 + 农耕 5 级 + 城镇
   const feudal = set(w => {
     const v = w.civ.vars;
     v.laborForced = 0.05; v.laborBonded = 0.6; v.laborWage = 0.1; v.laborCoop = 0.1;
     v.landConcentration = 0.7; v.market = 0.15; v.ownPrivate = 0.6; v.ownCommon = 0.35;
-    w.civ.tech.levels.agriculture = 4;
+    v.stateCapacity = 0.4;
+    w.civ.tech.levels.agriculture = 5;
     w.civ.tech.progress.agriculture = 999;
     w.civ.tech.levels.industry = 1;
+    w.settlements[0].population = 500;
+    w.settlements[0].stage = 'town';
   });
   assert.equal(feudal.form, 'feudal', `实际=${feudal.form}`);
 
-  // 资本主义：雇佣 + 市场 + 工业
+  // 资本主义：雇佣 + 市场 + 工业 3 级 + 城镇
   const cap = set(w => {
     const v = w.civ.vars;
     v.laborWage = 0.65; v.laborForced = 0.02; v.laborBonded = 0.05; v.laborCoop = 0.05;
     v.market = 0.8; v.ownPrivate = 0.75; v.ownCommon = 0.15;
     w.civ.tech.levels.industry = 3;
     w.civ.tech.progress.industry = 999;
+    w.settlements[0].population = 500;
+    w.settlements[0].stage = 'town';
+    w.settlements[0].buildings.push({ id: 999, kind: 'townhouse' as any, x: w.settlements[0].x + 1, y: w.settlements[0].y + 1, builtYear: 0, progress: 1 });
+    w.settlements[0].buildings.push({ id: 998, kind: 'townhouse' as any, x: w.settlements[0].x - 1, y: w.settlements[0].y + 1, builtYear: 0, progress: 1 });
   });
   assert.equal(cap.form, 'capitalist', `实际=${cap.form}`);
 
-  // 社会主义：公有 + 合作 + 公共服务
+  // 社会主义：公有 + 合作 + 公共服务 + 工业 4 级
   const soc = set(w => {
     const v = w.civ.vars;
     v.ownPublic = 0.6; v.ownPrivate = 0.08; v.ownCommon = 0.3;
     v.laborCoop = 0.6; v.laborWage = 0.2; v.laborForced = 0; v.laborBonded = 0;
     v.publicServices = 0.7; v.participation = 0.7; v.education = 0.6;
+    w.civ.tech.levels.industry = 4;
+    w.civ.tech.progress.industry = 999;
+    w.settlements[0].population = 500;
+    w.settlements[0].stage = 'town';
   });
   assert.equal(soc.form, 'socialist', `实际=${soc.form}`);
 });
@@ -184,7 +198,7 @@ test('存档往返保持世界一致', () => {
   for (let i = 0; i < 25; i++) tickYear(w);
   const json = serialize(w, '测试世界');
   const parsed = JSON.parse(json);
-  assert.equal(parsed.version, 1);
+  assert.equal(parsed.version, 2);
   const res = deserialize(json);
   assert.ok('world' in res, `应可解析: ${JSON.stringify(res)}`);
   if ('world' in res) {
@@ -224,17 +238,31 @@ test('长程演化不崩溃且产生编年史', () => {
 
 test('形态变迁会记录判定依据事件', () => {
   const w = world(2024, 'valley');
-  // 人为推向封建
+  // 人为推向封建（满足 v2.0 硬性前置 + 5 年回滞判定）
   for (let i = 0; i < 5; i++) tickYear(w);
   const v = w.civ.vars;
-  v.laborBonded = 0.65; v.landConcentration = 0.75; v.market = 0.1;
+  v.laborBonded = 0.65; v.landConcentration = 0.75; v.market = 0.1; v.stateCapacity = 0.4;
   v.ownPrivate = 0.55; v.ownCommon = 0.4;
-  w.civ.tech.levels.agriculture = 4;
+  w.civ.tech.levels.agriculture = 5;
   w.civ.tech.progress.agriculture = 999;
-  tickYear(w);
+  w.settlements[0].population = 500;
+  w.settlements[0].stage = 'town';
+  for (let i = 0; i < 6; i++) tickYear(w);
   assert.equal(w.civ.form, 'feudal', `形态=${w.civ.form}`);
   const ev = w.chronicle.filter(e => e.category === 'institution');
   assert.ok(ev.length > 0, '形态变迁应产生制度事件');
   assert.ok(ev[ev.length - 1].causes.length > 0, '变迁事件应记录判定依据');
   assert.ok(ev[ev.length - 1].effects.some(e => e.includes('封建')));
+});
+
+test('历史不会跳级：部落世界无法被识别为高级形态', () => {
+  const w = world(31337, 'dawn');
+  for (let i = 0; i < 80; i++) tickYear(w);
+  // 即便制度变量被强行拉高，技术/聚落规模的硬前置仍然拦截误判
+  const v = w.civ.vars;
+  v.laborWage = 0.7; v.market = 0.9; v.ownPrivate = 0.8;
+  const cls = classifySociety(w);
+  assert.equal(cls.form, 'primitive', `形态=${cls.form}`);
+  assert.ok(cls.blocked.some(b => b.form === 'capitalist' && b.missing.length > 0),
+    '资本主义应列出未满足的前置');
 });

@@ -1,45 +1,154 @@
 #!/bin/bash
-# Society Lab《人类社会实验室》— 沙箱预览服务器
-#
-# 由容器启动脚本 /start.sh 在 BOOT 时以后台任务执行（sudo -u z bash 本文件），
-# 是唯一能在工具调用之间存活的进程启动方式。
-# 作用：在 0.0.0.0:3000 服务 dist/ 静态构建，供 Caddy 网关（对外预览面板）代理。
-#
-# 零依赖：仅需系统自带 node（/usr/bin/node）。
 
-LOG=/tmp/society-lab-preview.log
-PROJECT=/home/z/my-project
-GAME=$PROJECT/download/society-lab
-SERVER=$PROJECT/scripts/serve-preview.mjs
+set -euo pipefail
 
-log() { echo "[$(date '+%Y-%m-%d %H:%M:%S')] $*" >> "$LOG"; }
+# 获取脚本所在目录（.zscripts）
+# 使用 $0 获取脚本路径（与 build.sh 保持一致）
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
-log "=== Society Lab preview dev.sh started (pid $$) ==="
+log_step_start() {
+	local step_name="$1"
+	echo "=========================================="
+	echo "[$(date '+%Y-%m-%d %H:%M:%S')] Starting: $step_name"
+	echo "=========================================="
+	export STEP_START_TIME
+	STEP_START_TIME=$(date +%s)
+}
 
-# 健壮性：若 3000 端口已被占用（平台 bun dev 流程等），仅记录并退出
-if command -v node >/dev/null 2>&1; then
-  log "node found: $(node --version)"
-else
-  log "FATAL: node not found; cannot serve preview"
-  exit 1
+log_step_end() {
+	local step_name="${1:-Unknown step}"
+	local end_time
+	end_time=$(date +%s)
+	local duration=$((end_time - STEP_START_TIME))
+	echo "=========================================="
+	echo "[$(date '+%Y-%m-%d %H:%M:%S')] Completed: $step_name"
+	echo "[LOG] Step: $step_name | Duration: ${duration}s"
+	echo "=========================================="
+	echo ""
+}
+
+start_mini_services() {
+	local mini_services_dir="$PROJECT_DIR/mini-services"
+	local started_count=0
+
+	log_step_start "Starting mini-services"
+	if [ ! -d "$mini_services_dir" ]; then
+		echo "Mini-services directory not found, skipping..."
+		log_step_end "Starting mini-services"
+		return 0
+	fi
+
+	echo "Found mini-services directory, scanning for sub-services..."
+
+	for service_dir in "$mini_services_dir"/*; do
+		if [ ! -d "$service_dir" ]; then
+			continue
+		fi
+
+		local service_name
+		service_name=$(basename "$service_dir")
+		echo "Checking service: $service_name"
+
+		if [ ! -f "$service_dir/package.json" ]; then
+			echo "[$service_name] No package.json found, skipping..."
+			continue
+		fi
+
+		if ! grep -q '"dev"' "$service_dir/package.json"; then
+			echo "[$service_name] No dev script found, skipping..."
+			continue
+		fi
+
+		echo "Starting $service_name in background..."
+		(
+			cd "$service_dir"
+			echo "[$service_name] Installing dependencies..."
+			bun install
+			echo "[$service_name] Running bun run dev..."
+			exec bun run dev
+		) >"$PROJECT_DIR/.zscripts/mini-service-${service_name}.log" 2>&1 &
+
+		local service_pid=$!
+		echo "[$service_name] Started in background (PID: $service_pid)"
+		echo "[$service_name] Log: $PROJECT_DIR/.zscripts/mini-service-${service_name}.log"
+		disown "$service_pid" 2>/dev/null || true
+		started_count=$((started_count + 1))
+	done
+
+	echo "Mini-services startup completed. Started $started_count service(s)."
+	log_step_end "Starting mini-services"
+}
+
+wait_for_service() {
+	local host="$1"
+	local port="$2"
+	local service_name="$3"
+	local max_attempts="${4:-60}"
+	local attempt=1
+
+	echo "Waiting for $service_name to be ready on $host:$port..."
+
+	while [ "$attempt" -le "$max_attempts" ]; do
+		if curl -s --connect-timeout 2 --max-time 5 "http://$host:$port" >/dev/null 2>&1; then
+			echo "$service_name is ready!"
+			return 0
+		fi
+
+		echo "Attempt $attempt/$max_attempts: $service_name not ready yet, waiting..."
+		sleep 1
+		attempt=$((attempt + 1))
+	done
+
+	echo "ERROR: $service_name failed to start within $max_attempts seconds"
+	return 1
+}
+
+cleanup() {
+	if [ -n "${DEV_PID:-}" ] && kill -0 "$DEV_PID" >/dev/null 2>&1; then
+		echo "Stopping Next.js dev server (PID: $DEV_PID)..."
+		kill "$DEV_PID" >/dev/null 2>&1 || true
+	fi
+}
+
+trap cleanup EXIT INT TERM
+
+cd "$PROJECT_DIR"
+
+if ! command -v bun >/dev/null 2>&1; then
+	echo "ERROR: bun is not installed or not in PATH"
+	exit 1
 fi
 
-# dist 不存在时尝试构建（node_modules 通常不随恢复保留，尽力而为）
-if [ ! -f "$GAME/dist/index.html" ]; then
-  log "dist/ missing, attempting build..."
-  if [ -d "$GAME/node_modules" ]; then
-    (cd "$GAME" && npx vite build >> "$LOG" 2>&1) \
-      && log "build OK" \
-      || log "build FAILED (dist missing)"
-  else
-    log "node_modules missing too — skipping build (dist must be committed)"
-  fi
-fi
+log_step_start "bun install"
+echo "[BUN] Installing dependencies..."
+bun install
+log_step_end "bun install"
 
-if [ -f "$GAME/dist/index.html" ]; then
-  log "serving $GAME/dist on :3000"
-  exec node "$SERVER"
-else
-  log "FATAL: $GAME/dist/index.html not found; preview unavailable"
-  exit 1
-fi
+log_step_start "bun run db:push"
+echo "[BUN] Setting up database..."
+bun run db:push
+log_step_end "bun run db:push"
+
+log_step_start "Starting Next.js dev server"
+echo "[BUN] Starting development server..."
+bun run dev &
+DEV_PID=$!
+log_step_end "Starting Next.js dev server"
+
+log_step_start "Waiting for Next.js dev server"
+wait_for_service "localhost" "3000" "Next.js dev server"
+log_step_end "Waiting for Next.js dev server"
+
+log_step_start "Health check"
+echo "[BUN] Performing health check..."
+curl -fsS localhost:3000 >/dev/null
+echo "[BUN] Health check passed"
+log_step_end "Health check"
+
+start_mini_services
+
+echo "Next.js dev server is running in background (PID: $DEV_PID)."
+echo "Use 'kill $DEV_PID' to stop it."
+disown "$DEV_PID" 2>/dev/null || true
+unset DEV_PID

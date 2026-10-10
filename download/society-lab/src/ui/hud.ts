@@ -1,11 +1,15 @@
 /**
- * HUD — 顶栏 / 神力工具栏 / 事件流 / toast
+ * HUD — 顶栏 / 神力工具栏 / 事件流 / toast（v2.0）
+ * - 神力四组：造物 / 天象 / 灾厄 / 启蒙
+ * - 左侧工具栏与右侧详情栏可收缩（localStorage 记忆）
+ * - 顶栏显示文明政体称谓
  */
 import { FORM_NAMES, type WorldState, type GodPowerId } from '../types';
 import { GOD_POWERS } from '../powers';
 import { icon } from './icons';
 import { macroEconomy } from '../sim/economy';
 import { formLabel, classifySociety } from '../sim/society';
+import { civEntityName } from '../names';
 
 export interface HudCallbacks {
   onSpeed: (s: number) => void;
@@ -22,6 +26,7 @@ export interface HudCallbacks {
   onFoodStat: () => void;
   onMute: () => void;
   onHome: () => void;
+  onCollapseToolbar: (collapsed: boolean) => void;
 }
 
 export interface HudState {
@@ -43,6 +48,7 @@ export function buildHud(root: HTMLElement, cbs: HudCallbacks, topbarHost?: HTML
     </div>
     <div class="top-stat" id="stat-year" title="当前年份">${icon('clock', 16)}<b id="year-v">0</b>&nbsp;年</div>
     <div class="badge-form" id="badge-form" title="点击查看社会形态详情">原始社会</div>
+    <div class="top-stat" id="stat-entity" title="文明的政治实体称谓">${icon('people', 15)}<b id="entity-v">部族</b></div>
     <div class="top-stat clickable" id="stat-pop" title="总人口（点击查看观察者数据）">${icon('people', 16)}<b id="pop-v">0</b></div>
     <div class="top-stat clickable" id="stat-food" title="粮食保障率">${icon('wheat', 16)}<b id="food-v">—</b></div>
     <div class="topbar-spacer"></div>
@@ -51,9 +57,10 @@ export function buildHud(root: HTMLElement, cbs: HudCallbacks, topbarHost?: HTML
       <button data-speed="1" class="active" title="正常速度 (1)">${icon('play', 17)}</button>
       <button data-speed="2" title="快速 (2)">${icon('ff', 15)}</button>
       <button data-speed="4" title="极速 (3)">${icon('fff', 15)}</button>
+      <button data-speed="8" title="超极速 (4)">${icon('fff', 13)}<span style="font-size:9px;font-weight:700">8×</span></button>
       <button id="step-btn" title="单步推进一年（暂停时可用）">${icon('step', 16)}</button>
     </div>
-    <button class="icon-btn" id="btn-home" title="回到全景视角 (H)">${icon('home', 18)}</button>
+    <button class="icon-btn" id="btn-home" title="全景视角 · 缩放到整张地图 (H)">${icon('home', 18)}</button>
     <button class="icon-btn" id="btn-chronicle" title="历史编年史 (C)">${icon('book', 18)}</button>
     <button class="icon-btn" id="btn-observer" title="观察者数据 (O)">${icon('chart', 18)}</button>
     <button class="icon-btn" id="btn-save" title="保存 / 读取 (S)">${icon('save', 18)}</button>
@@ -69,14 +76,18 @@ export function buildHud(root: HTMLElement, cbs: HudCallbacks, topbarHost?: HTML
   const groups: { key: string; label: string }[] = [
     { key: 'create', label: '造 物' },
     { key: 'sky', label: '天 象' },
+    { key: 'calamity', label: '灾 厄' },
     { key: 'guide', label: '启 蒙' },
   ];
   let tbHtml = `
-    <div class="toolbar-group">
-      <h4>选 择</h4>
+    <div class="toolbar-group tb-head-group">
+      <h4 id="tb-collapse-row">
+        <span>神 力</span>
+        <button id="tb-collapse" title="收起 / 展开工具栏 (Tab)">${icon('chevron-left', 14)}</button>
+      </h4>
       <button class="power-btn" data-power="pointer">
         <span class="p-ic">${icon('pointer', 17)}</span>
-        <span class="p-info"><span class="p-name">检视 / 选择</span><span class="p-cost">拖拽平移 · 滚轮缩放 · 点击查看</span></span>
+        <span class="p-info"><span class="p-name">检视 / 选择</span><span class="p-cost">拖拽平移 · 滚轮缩放</span></span>
       </button>
     </div>`;
   for (const g of groups) {
@@ -87,9 +98,6 @@ export function buildHud(root: HTMLElement, cbs: HudCallbacks, topbarHost?: HTML
           <span class="p-ic">${icon(p.icon, 17)}</span>
           <span class="p-info"><span class="p-name">${p.name}</span><span class="p-cost" data-cost="${p.id}">⚡ ${p.cost}</span></span>
         </button>`;
-      if (p.group === 'create') {
-        // 笔刷尺寸只在造物组后出现一次
-      }
     }
     tbHtml += `</div>`;
   }
@@ -147,8 +155,21 @@ export function buildHud(root: HTMLElement, cbs: HudCallbacks, topbarHost?: HTML
     const bb = (e.target as HTMLElement).closest('[data-brush]') as HTMLElement | null;
     if (bb) cbs.onBrush(Number(bb.dataset.brush));
   });
+  const collapseBtn = toolbar.querySelector('#tb-collapse');
+  collapseBtn?.addEventListener('click', () => {
+    const collapsed = !toolbar.classList.contains('collapsed');
+    setToolbarCollapsed(toolbar, collapsed);
+    cbs.onCollapseToolbar(collapsed);
+  });
 
   return { topbar, toolbar, feed, hint };
+}
+
+export function setToolbarCollapsed(toolbar: HTMLElement, collapsed: boolean) {
+  toolbar.classList.toggle('collapsed', collapsed);
+  const btn = toolbar.querySelector('#tb-collapse');
+  if (btn) btn.innerHTML = icon(collapsed ? 'chevron-right' : 'chevron-left', 14);
+  document.getElementById('game')?.classList.toggle('tb-collapsed', collapsed);
 }
 
 export function setHudSpeed(topbar: HTMLElement, speed: number) {
@@ -182,6 +203,11 @@ export function updateTopbar(root: HTMLElement, w: WorldState, worldName: string
   (root.querySelector('#brand-name') as HTMLElement).textContent = worldName;
   (root.querySelector('#brand-seed') as HTMLElement).textContent = `seed ${w.config.seed} · ${w.config.size}×${w.config.size} · ${w.config.mode === 'free' ? '自由上帝' : '有限干预'}`;
   (root.querySelector('#year-v') as HTMLElement).textContent = String(w.year);
+  // 政体称谓
+  const largest = w.settlements.filter(s => !s.dead).sort((a, b) => b.population - a.population)[0];
+  const entity = civEntityName(w.civ.form, largest?.stage ?? 'camp', w.settlements.filter(s => !s.dead).length);
+  const entityEl = root.querySelector('#entity-v') as HTMLElement;
+  if (entityEl.textContent !== entity) entityEl.textContent = entity;
   const badge = root.querySelector('#badge-form') as HTMLElement;
   const newLabel = formLabel(cls);
   if (badge.textContent !== newLabel) {

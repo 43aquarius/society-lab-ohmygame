@@ -38,6 +38,13 @@ function footprint(kind: BuildingKind): { w: number; d: number } {
     case BuildingKind.Services: return { w: 1.5, d: 1.3 };
     case BuildingKind.Cooperative: return { w: 1.4, d: 1.2 };
     case BuildingKind.Market: return { w: 1.5, d: 1.2 };
+    case BuildingKind.Castle: return { w: 1.7, d: 1.5 };
+    case BuildingKind.Manor: return { w: 1.6, d: 1.4 };
+    case BuildingKind.Temple: return { w: 1.5, d: 1.3 };
+    case BuildingKind.Academy: return { w: 1.3, d: 1.1 };
+    case BuildingKind.Bank: return { w: 1.3, d: 1.1 };
+    case BuildingKind.Theater: return { w: 1.4, d: 1.3 };
+    case BuildingKind.Hospital: return { w: 1.2, d: 1.1 };
     case BuildingKind.Wall: return { w: 1.6, d: 0.7 };
     default: return { w: 1, d: 1 };
   }
@@ -217,24 +224,74 @@ function drawCompleted(
       break;
     }
     case BuildingKind.Shelter: {
-      box(ctx, sx, sy, 0.7, 0.7, 8, pal.wood, pal.woodDark, pal.wood);
-      gableRoof(ctx, sx, sy - 8, 0.8, 0.8, 0, 8, pal);
+      // 窝棚：树枝斜搭 + 茅草（v2.0 更精细：骨架线条 + 茅草层次）
+      shadow(ctx, sx, sy, 0.7, 0.7);
+      const h = 13;
+      ctx.strokeStyle = pal.woodDark;
+      ctx.lineWidth = 1.6;
+      ctx.beginPath();
+      ctx.moveTo(sx - 10, sy + 5); ctx.lineTo(sx - 2, sy - h);
+      ctx.moveTo(sx + 10, sy + 5); ctx.lineTo(sx + 2, sy - h);
+      ctx.moveTo(sx - 7, sy + 1); ctx.lineTo(sx + 1, sy - h + 3);
+      ctx.stroke();
+      // 茅草面（两片，带茅草簇）
+      ctx.fillStyle = pal.roof;
+      ctx.beginPath();
+      ctx.moveTo(sx - 2, sy + 7); ctx.lineTo(sx - 13, sy - h + 2); ctx.lineTo(sx + 1, sy - h - 1);
+      ctx.closePath(); ctx.fill();
+      ctx.fillStyle = pal.roofDark;
+      ctx.beginPath();
+      ctx.moveTo(sx + 2, sy + 7); ctx.lineTo(sx + 12, sy - h + 3); ctx.lineTo(sx + 2, sy - h - 1);
+      ctx.closePath(); ctx.fill();
+      // 茅草纹理
+      ctx.strokeStyle = 'rgba(120,96,52,0.5)';
+      ctx.lineWidth = 0.7;
+      ctx.beginPath();
+      for (let i = 0; i < 3; i++) {
+        ctx.moveTo(sx - 9 + i * 3, sy - h * 0.35 + i);
+        ctx.lineTo(sx - 6 + i * 3, sy - h * 0.62 + i);
+      }
+      ctx.stroke();
       break;
     }
     case BuildingKind.House: {
+      // 农舍 v2.0：木板墙纹理 + 双窗 + 门廊
       box(ctx, sx, sy, 0.85, 0.85, 14, pal.wood, pal.woodDark, shade(pal.wood, 0.85));
+      // 木板横纹
+      ctx.strokeStyle = 'rgba(90,64,42,0.35)';
+      ctx.lineWidth = 0.8;
+      ctx.beginPath();
+      for (let i = 1; i <= 3; i++) {
+        const yy = sy - 2 - i * 3;
+        ctx.moveTo(sx - 13, yy - 13.5); ctx.lineTo(sx, yy - 19.5);
+        ctx.moveTo(sx + 13, yy - 13.5); ctx.lineTo(sx, yy - 19.5);
+      }
+      ctx.stroke();
       gableRoof(ctx, sx, sy, 0.95, 0.95, 14, 8, pal);
       if (lod > 0.7) {
-        ctx.fillStyle = 'rgba(255,214,140,0.8)';
-        ctx.fillRect(sx + 3, sy - 8, 4, 4); // 窗
+        ctx.fillStyle = 'rgba(255,214,140,0.85)';
+        ctx.fillRect(sx + 4, sy - 8, 4, 4);
+        ctx.fillRect(sx - 9, sy - 11, 3.5, 3.5);
         ctx.fillStyle = pal.woodDark;
-        ctx.fillRect(sx - 7, sy - 4, 5, 6); // 门
+        ctx.fillRect(sx - 5, sy - 5, 5, 6);
+        ctx.fillStyle = 'rgba(40,30,20,0.5)';
+        ctx.fillRect(sx - 5, sy - 5, 5, 1.2); // 门楣阴影
       }
       if (!ghost && lod > 0.6) smoke(ctx, sx - 6, sy, sy - 26, time, seed, 0.5);
       break;
     }
     case BuildingKind.Townhouse: {
       box(ctx, sx, sy, 0.8, 0.8, 30, pal.stone, pal.stoneDark, shade(pal.stone, 0.8));
+      // 砖缝
+      ctx.strokeStyle = 'rgba(90,88,84,0.3)';
+      ctx.lineWidth = 0.7;
+      ctx.beginPath();
+      for (let i = 1; i <= 7; i++) {
+        const yy = sy - i * 3.4;
+        ctx.moveTo(sx - 12.5, yy - 12); ctx.lineTo(sx, yy - 17.5);
+        ctx.moveTo(sx + 12.5, yy - 12); ctx.lineTo(sx, yy - 17.5);
+      }
+      ctx.stroke();
       gableRoof(ctx, sx, sy, 0.9, 0.9, 30, 9, pal);
       if (lod > 0.65) {
         for (let i = 0; i < 3; i++) {
@@ -422,6 +479,277 @@ function drawCompleted(
       }
       break;
     }
+    // ============ v2.0 时代建筑 ============
+    case BuildingKind.Temple: {
+      // 神庙：三级台基 + 柱廊 + 金顶
+      box(ctx, sx, sy, 1.4, 1.2, 4, pal.stone, pal.stoneDark, shade(pal.stone, 0.8));
+      box(ctx, sx, sy - 4, 1.25, 1.05, 3, shade(pal.stone, 0.94), pal.stoneDark, shade(pal.stone, 0.84));
+      box(ctx, sx, sy - 7, 1.1, 0.9, 14, pal.stone, pal.stoneDark, shade(pal.stone, 0.82));
+      // 柱廊（浅色立柱）
+      if (lod > 0.5) {
+        ctx.fillStyle = 'rgb(232,226,210)';
+        for (let i = -2; i <= 2; i++) {
+          const px = sx + i * 11;
+          const py = sy - 9 + Math.abs(i) * -1.6;
+          ctx.fillRect(px - 1.6, py - 12, 3.2, 12);
+        }
+        ctx.fillStyle = 'rgba(180,168,146,0.6)';
+        for (let i = -2; i <= 2; i++) {
+          const px = sx + i * 11;
+          const py = sy - 9 + Math.abs(i) * -1.6;
+          ctx.fillRect(px + 0.4, py - 12, 1.2, 12);
+        }
+      }
+      // 金色梯形顶
+      ctx.fillStyle = 'rgb(214,178,84)';
+      ctx.beginPath();
+      ctx.moveTo(sx, sy - 34);
+      ctx.lineTo(sx + 30, sy - 22);
+      ctx.lineTo(sx + 24, sy - 19);
+      ctx.lineTo(sx - 24, sy - 19);
+      ctx.lineTo(sx - 30, sy - 22);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = 'rgb(178,142,58)';
+      ctx.beginPath();
+      ctx.moveTo(sx, sy - 34);
+      ctx.lineTo(sx + 30, sy - 22);
+      ctx.lineTo(sx + 24, sy - 19);
+      ctx.lineTo(sx, sy - 26);
+      ctx.closePath();
+      ctx.fill();
+      // 顶饰
+      ctx.fillStyle = 'rgb(240,216,140)';
+      ctx.beginPath();
+      ctx.arc(sx, sy - 36, 2.4, 0, Math.PI * 2);
+      ctx.fill();
+      if (!ghost && lod > 0.6) smoke(ctx, sx, sy - 24, sy - 52, time, seed, 0.45); // 香火
+      break;
+    }
+    case BuildingKind.Manor: {
+      // 庄园：主楼 + 厢房 + 围栏
+      box(ctx, sx - 14, sy + 2, 0.7, 0.6, 10, pal.wood, pal.woodDark, shade(pal.wood, 0.84));
+      gableRoof(ctx, sx - 14, sy + 2, 0.8, 0.7, 10, 6, pal);
+      box(ctx, sx, sy, 1.15, 1.0, 18, pal.wood, pal.woodDark, shade(pal.wood, 0.82));
+      gableRoof(ctx, sx, sy, 1.25, 1.1, 18, 9, pal);
+      if (lod > 0.55) {
+        // 明窗 + 大门 + 山墙装饰
+        ctx.fillStyle = 'rgba(255,214,140,0.9)';
+        ctx.fillRect(sx - 8, sy - 12, 4, 5);
+        ctx.fillRect(sx + 4, sy - 12, 4, 5);
+        ctx.fillRect(sx - 2, sy - 22, 4, 4);
+        ctx.fillStyle = pal.woodDark;
+        ctx.fillRect(sx - 2.5, sy - 4, 5, 6);
+      }
+      if (lod > 0.6) {
+        // 围栏
+        ctx.strokeStyle = pal.woodDark;
+        ctx.lineWidth = 1.4;
+        ctx.beginPath();
+        for (let i = 0; i < 5; i++) {
+          const fx = sx + 16 + i * 5, fy = sy + 8 - i * 2.2;
+          ctx.moveTo(fx, fy); ctx.lineTo(fx, fy - 4);
+        }
+        ctx.moveTo(sx + 16, sy + 6.5); ctx.lineTo(sx + 36, sy - 2.5);
+        ctx.stroke();
+      }
+      break;
+    }
+    case BuildingKind.Castle: {
+      // 城堡：主楼 + 双塔 + 城齿 + 旗
+      box(ctx, sx, sy, 1.15, 1.0, 26, pal.stone, pal.stoneDark, shade(pal.stone, 0.8));
+      box(ctx, sx - 22, sy + 3, 0.45, 0.4, 34, pal.stone, pal.stoneDark, shade(pal.stone, 0.78));
+      box(ctx, sx + 22, sy + 3, 0.45, 0.4, 34, pal.stone, pal.stoneDark, shade(pal.stone, 0.78));
+      // 城齿（主楼与塔）
+      ctx.fillStyle = pal.stone;
+      for (let i = -2; i <= 2; i++) {
+        ctx.fillRect(sx + i * 10 - 3.4, sy - 30 + Math.abs(i) * 2.4, 6.8, 6);
+      }
+      for (const tx of [sx - 22, sx + 22]) {
+        for (let i = -1; i <= 1; i++) {
+          ctx.fillRect(tx + i * 7 - 2.6, sy - 33 + Math.abs(i) * 2 + 3, 5.2, 5);
+        }
+        // 塔顶锥
+        ctx.fillStyle = pal.roof;
+        ctx.beginPath();
+        ctx.moveTo(tx, sy - 52);
+        ctx.lineTo(tx + 9, sy - 36);
+        ctx.lineTo(tx - 9, sy - 36);
+        ctx.closePath();
+        ctx.fill();
+        ctx.fillStyle = pal.roofDark;
+        ctx.beginPath();
+        ctx.moveTo(tx, sy - 52);
+        ctx.lineTo(tx + 9, sy - 36);
+        ctx.lineTo(tx, sy - 38);
+        ctx.closePath();
+        ctx.fill();
+      }
+      // 主旗
+      if (lod > 0.5) {
+        ctx.strokeStyle = pal.cloth;
+        ctx.lineWidth = 1.8;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy - 32); ctx.lineTo(sx, sy - 50);
+        ctx.stroke();
+        const wave = Math.sin(time * 0.004 + seed * 7) * 2.5;
+        ctx.fillStyle = 'rgb(168,74,58)';
+        ctx.beginPath();
+        ctx.moveTo(sx, sy - 50);
+        ctx.lineTo(sx + 14 + wave, sy - 46);
+        ctx.lineTo(sx, sy - 41);
+        ctx.closePath();
+        ctx.fill();
+        // 门与箭窗
+        ctx.fillStyle = 'rgb(58,44,34)';
+        ctx.fillRect(sx - 3.4, sy - 7, 6.8, 7);
+        ctx.fillRect(sx - 22 - 1.5, sy - 8, 3, 4);
+        ctx.fillRect(sx + 22 - 1.5, sy - 8, 3, 4);
+      }
+      break;
+    }
+    case BuildingKind.Academy: {
+      // 学堂：厅堂 + 钟楼
+      box(ctx, sx, sy, 1.05, 0.9, 16, 'rgb(184,142,96)', 'rgb(146,108,70)', 'rgb(162,124,84)');
+      gableRoof(ctx, sx, sy, 1.15, 1.0, 16, 8, pal);
+      box(ctx, sx + 18, sy - 2, 0.34, 0.3, 26, pal.stone, pal.stoneDark, shade(pal.stone, 0.82));
+      // 钟楼尖顶
+      ctx.fillStyle = 'rgb(70,86,110)';
+      ctx.beginPath();
+      ctx.moveTo(sx + 18, sy - 34);
+      ctx.lineTo(sx + 26, sy - 26);
+      ctx.lineTo(sx + 10, sy - 26);
+      ctx.closePath();
+      ctx.fill();
+      if (lod > 0.55) {
+        // 钟
+        ctx.fillStyle = 'rgb(214,178,84)';
+        ctx.beginPath();
+        ctx.moveTo(sx + 16, sy - 24);
+        ctx.quadraticCurveTo(sx + 18, sy - 20, sx + 20, sy - 24);
+        ctx.closePath();
+        ctx.fill();
+        // 门窗
+        ctx.fillStyle = 'rgba(255,214,140,0.85)';
+        ctx.fillRect(sx - 8, sy - 12, 4, 5);
+        ctx.fillRect(sx + 4, sy - 12, 4, 5);
+        ctx.fillStyle = 'rgb(88,62,42)';
+        ctx.fillRect(sx - 2.4, sy - 6, 4.8, 6);
+        // 书卷匾额
+        ctx.fillStyle = 'rgb(240,232,210)';
+        ctx.fillRect(sx - 7, sy - 21, 14, 5);
+        ctx.strokeStyle = 'rgb(120,100,70)';
+        ctx.lineWidth = 0.8;
+        ctx.strokeRect(sx - 7, sy - 21, 14, 5);
+        ctx.beginPath();
+        ctx.moveTo(sx - 4, sy - 19.5); ctx.lineTo(sx + 4, sy - 19.5);
+        ctx.moveTo(sx - 4, sy - 17.5); ctx.lineTo(sx + 2, sy - 17.5);
+        ctx.stroke();
+      }
+      break;
+    }
+    case BuildingKind.Bank: {
+      // 银行：石砌殿堂 + 三角楣 + 四柱
+      box(ctx, sx, sy, 1.2, 1.0, 18, pal.stone, pal.stoneDark, shade(pal.stone, 0.84));
+      // 四柱
+      ctx.fillStyle = 'rgb(226,220,206)';
+      for (let i = 0; i < 4; i++) {
+        const px = sx - 15 + i * 10;
+        ctx.fillRect(px - 1.8, sy - 16 + Math.abs(i - 1.5) * -1.2, 3.6, 14);
+      }
+      // 檐口
+      box(ctx, sx, sy - 16, 1.3, 1.1, 3, 'rgb(214,208,196)', 'rgb(178,172,160)', 'rgb(196,190,178)');
+      // 三角楣
+      ctx.fillStyle = 'rgb(226,220,206)';
+      ctx.beginPath();
+      ctx.moveTo(sx, sy - 30);
+      ctx.lineTo(sx + 26, sy - 19);
+      ctx.lineTo(sx - 26, sy - 19);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = 'rgba(178,172,160,0.55)';
+      ctx.beginPath();
+      ctx.moveTo(sx, sy - 30);
+      ctx.lineTo(sx + 26, sy - 19);
+      ctx.lineTo(sx, sy - 22);
+      ctx.closePath();
+      ctx.fill();
+      if (lod > 0.55) {
+        // 门 + 金币徽记
+        ctx.fillStyle = 'rgb(64,54,44)';
+        ctx.fillRect(sx - 5, sy - 8, 10, 8);
+        ctx.fillStyle = 'rgb(214,178,84)';
+        ctx.beginPath();
+        ctx.arc(sx, sy - 25, 2.6, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = 'rgb(150,118,50)';
+        ctx.font = '600 4px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText('¥', sx, sy - 23.8);
+      }
+      break;
+    }
+    case BuildingKind.Theater: {
+      // 剧场：半环形看台 + 条纹篷
+      ctx.fillStyle = 'rgb(190,168,132)';
+      ctx.beginPath();
+      ctx.ellipse(sx, sy, 26, 14, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgb(162,140,108)';
+      ctx.beginPath();
+      ctx.ellipse(sx, sy - 3, 21, 11, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgb(122,102,78)';
+      ctx.beginPath();
+      ctx.ellipse(sx, sy - 3, 13, 7, 0, 0, Math.PI * 2);
+      ctx.fill();
+      // 舞台
+      ctx.fillStyle = 'rgb(214,190,150)';
+      ctx.beginPath();
+      ctx.ellipse(sx, sy - 3, 7, 4, 0, 0, Math.PI * 2);
+      ctx.fill();
+      if (lod > 0.5) {
+        // 看台坐席弧线
+        ctx.strokeStyle = 'rgba(96,80,60,0.5)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.ellipse(sx, sy - 3, 17, 9, 0, Math.PI * 0.15, Math.PI * 0.85);
+        ctx.stroke();
+        // 条纹大篷 + 旗杆
+        for (let i = 0; i < 5; i++) {
+          ctx.fillStyle = i % 2 ? 'rgb(168,74,58)' : 'rgb(238,228,208)';
+          ctx.fillRect(sx - 14 + i * 5.6, sy - 16, 5.6, 4);
+        }
+        ctx.fillStyle = 'rgb(96,80,60)';
+        ctx.fillRect(sx - 15, sy - 20, 30, 2);
+      }
+      break;
+    }
+    case BuildingKind.Hospital: {
+      // 医院：白楼 + 红十字旗
+      box(ctx, sx, sy, 1.05, 0.9, 18, 'rgb(234,236,232)', 'rgb(198,204,200)', 'rgb(218,222,218)');
+      gableRoof(ctx, sx, sy, 1.15, 1.0, 18, 6, { ...pal, roof: 'rgb(148,164,172)', roofDark: 'rgb(120,136,144)' });
+      if (lod > 0.5) {
+        // 窗（成排）
+        for (let i = 0; i < 3; i++) {
+          ctx.fillStyle = 'rgba(168,200,216,0.9)';
+          ctx.fillRect(sx - 10 + i * 8, sy - 13, 4.5, 4);
+          ctx.fillRect(sx - 10 + i * 8, sy - 5, 4.5, 4);
+        }
+        // 十字旗
+        ctx.strokeStyle = 'rgb(160,160,156)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy - 24); ctx.lineTo(sx, sy - 40);
+        ctx.stroke();
+        ctx.fillStyle = 'rgb(224,224,220)';
+        ctx.fillRect(sx + 0.5, sy - 40, 13, 9);
+        ctx.fillStyle = 'rgb(200,72,58)';
+        ctx.fillRect(sx + 5, sy - 39, 4, 7);
+        ctx.fillRect(sx + 2.5, sy - 37.5, 9, 3.5);
+      }
+      break;
+    }
   }
 }
 
@@ -473,7 +801,10 @@ function eraOf(w: WorldState, b: Building): number {
     case BuildingKind.Camp: return 0;
     case BuildingKind.Shelter: return 0;
     case BuildingKind.Townhouse: case BuildingKind.Factory: return 3;
-    case BuildingKind.Cooperative: case BuildingKind.Services: return 4;
+    case BuildingKind.Bank: case BuildingKind.Theater: return 3;
+    case BuildingKind.Cooperative: case BuildingKind.Services: case BuildingKind.Hospital: return 4;
+    case BuildingKind.Temple: case BuildingKind.Manor: case BuildingKind.Castle: return 2;
+    case BuildingKind.Academy: return lvl('education') >= 4 ? 3 : 2;
     case BuildingKind.Market: case BuildingKind.Admin: case BuildingKind.Wall: case BuildingKind.Workshop: return 2;
     default: return lvl('agriculture') >= 2 ? 1 : 0;
   }
@@ -484,6 +815,8 @@ export function buildingTopOffset(kind: BuildingKind): number {
   switch (kind) {
     case BuildingKind.Factory: return 52;
     case BuildingKind.Admin: return 50;
+    case BuildingKind.Castle: return 54;
+    case BuildingKind.Temple: return 40;
     case BuildingKind.Townhouse: return 42;
     case BuildingKind.Services: return 40;
     case BuildingKind.Wall: return 18;
