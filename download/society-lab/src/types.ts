@@ -66,7 +66,7 @@ export interface Tile {
   fertility: number;
   /** 湿度，影响农业并受天气干预 */
   moisture: number;
-  /** 海拔层级 0..4（渲染用） */
+  /** 海拔层级 0..6（v3.0：更丰富的起伏，悬崖渲染用） */
   elevation: number;
   /** 是否含矿脉（丘陵/山地/石地） */
   ore: boolean;
@@ -291,6 +291,18 @@ export interface EventRecord {
   intervened: boolean;
   settlementId?: number;
   severity: number;
+  /** v3.0：视觉表现挂接（交战双方、坐标等，不改模拟语义） */
+  aux?: { attackerId?: number; defenderId?: number; x?: number; y?: number; radius?: number };
+}
+
+/** v3.0：持久的沙盘印记（坟墓/陨坑/焦痕/废墟），随存档保存 */
+export type DecalKind = 'grave' | 'crater' | 'scorch' | 'ruin';
+export interface Decal {
+  kind: DecalKind;
+  x: number;
+  y: number;
+  year: number;
+  seed: number;
 }
 
 export interface ActiveEvent {
@@ -369,4 +381,6 @@ export interface WorldState {
   nextEventId: number;
   /** 分支快照（里程碑节点） */
   snapshots: { year: number; label: string; data: string }[];
+  /** v3.0：持久沙盘印记（坟墓/陨坑/焦痕/废墟），上限控制内存 */
+  decals: Decal[];
 }

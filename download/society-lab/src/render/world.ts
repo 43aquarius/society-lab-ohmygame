@@ -1,15 +1,18 @@
 /**
- * VisualWorld — 世界渲染与摄像机（v2.0）
- * 画布分层职责：地形（缓存贴图或近景逐格）→ 领地边界 → 农田与建筑/小人（y 排序）
- * → 事件特效 → 天气粒子 → 聚落标签（防重叠）→ 笔刷光标 → 小地图。
+ * VisualWorld — 世界渲染与摄像机（v3.0）
+ * 画布分层职责：地形（缓存贴图或近景逐格）→ 印记（坟墓/陨坑）→ 领地边界
+ * → 建筑与小人（统一 y 排序，海拔感知）→ 事件特效 → 天气 →
+ * 昼夜暗幕 → 灯火合成层（窗光/篝火）→ 聚落标签 → 笔刷 → 云影 → 小地图。
  * 视口裁剪 + LOD + 地形缓存保证大地图流畅。
  */
 import { Terrain, BuildingKind, type WorldState, type Settlement } from '../types';
-import { TILE_W, TILE_H, ELEV_H, gridToScreen, screenToGrid, vhash, clamp } from './iso';
-import { drawTile, drawBorders, TerrainCache } from './terrain';
-import { drawBuilding } from './buildings';
-import { spawnVillagers, updateVillagers, drawVillagers, type Villager } from './villagers';
+import { CFG } from '../config';
+import { TILE_W, TILE_H, ELEV_H, gridToScreen, screenToGrid, vhash, clamp, elevAt } from './iso';
+import { drawBorders, TerrainCache } from './terrain';
+import { drawBuilding, beginLights, collectLights } from './buildings';
+import { AgentSystem, daySlot, nightFactor } from './agents';
 import { EffectSystem } from './effects';
+import { drawDecals } from '../decals';
 
 export interface Camera {
   x: number; y: number;     // 世界像素中心
@@ -24,11 +27,15 @@ export interface Ping {
   color: string;
 }
 
+/** 云影与飞鸟（环境生命感） */
+interface Cloud { x: number; y: number; r: number; s: number; a: number }
+interface Bird { x: number; y: number; vx: number; vy: number; ph: number; life: number }
+
 export class VisualWorld {
   canvas: HTMLCanvasElement;
   ctx: CanvasRenderingContext2D;
   camera: Camera;
-  villagers = new Map<number, Villager[]>();
+  agents = new AgentSystem();
   pings: Ping[] = [];
   hoverTile: { x: number; y: number } | null = null;
   brushRadius = 1;
@@ -37,6 +44,10 @@ export class VisualWorld {
   minimapDirty = true;
   terrainCache = new TerrainCache();
   fx = new EffectSystem();
+  /** 昼夜时钟（现实秒，暂停时停走；dayPhase = (clock % daySeconds)/daySeconds） */
+  dayClock = CFG.daySeconds * 0.34; // 从上午开始
+  private clouds: Cloud[] = [];
+  private birds: Bird[] = [];
   private lastMinimapDraw = 0;
   flashOverlay: { color: string; alpha: number } | null = null;
 
@@ -44,6 +55,9 @@ export class VisualWorld {
     this.canvas = canvas;
     this.ctx = canvas.getContext('2d')!;
     this.camera = { x: 0, y: 0, zoom: 1.15, targetZoom: 1.15, targetX: 0, targetY: 0 };
+    for (let i = 0; i < 3; i++) {
+      this.clouds.push({ x: Math.random(), y: Math.random(), r: 90 + Math.random() * 130, s: 0.004 + Math.random() * 0.006, a: 0.05 + Math.random() * 0.05 });
+    }
     this.resize();
   }
 
@@ -65,12 +79,11 @@ export class VisualWorld {
   fitMap(size: number) {
     const rect = this.canvas.getBoundingClientRect();
     const W = Math.max(320, rect.width), H = Math.max(240, rect.height);
-    const worldW = size * TILE_W, worldH = size * TILE_H + ELEV_H * 8;
+    const worldW = size * TILE_W, worldH = size * TILE_H + ELEV_H * 10;
     const zoom = Math.min(W / worldW, H / worldH) * 0.96;
     this.camera.targetZoom = zoom;
     this.camera.targetX = 0;
     this.camera.targetY = (size * TILE_H) / 2;
-    // 立即贴合（开局无缓动）
     this.camera.zoom = zoom;
     this.camera.x = 0;
     this.camera.y = (size * TILE_H) / 2;
@@ -79,10 +92,11 @@ export class VisualWorld {
   focusSettlement(s: Settlement) {
     const p = gridToScreen(s.x, s.y);
     this.camera.targetX = p.x;
-    this.camera.targetY = p.y;
+    this.camera.targetY = p.y - elevAt(this.worldRef!, s.x, s.y) * ELEV_H;
     this.camera.targetZoom = Math.max(this.camera.zoom, 1.6);
     this.addPing(s.x, s.y, 'rgba(201,162,39,0.9)');
   }
+  private worldRef: WorldState | null = null;
 
   addPing(gx: number, gy: number, color: string) {
     this.pings.push({ x: gx, y: gy, ttl: 2.2, color });
@@ -99,6 +113,7 @@ export class VisualWorld {
 
   /** 主渲染入口 */
   render(w: WorldState, dt: number, time: number, paused: boolean) {
+    this.worldRef = w;
     const ctx = this.ctx;
     const rect = this.canvas.getBoundingClientRect();
     const W = rect.width, H = rect.height;
@@ -109,8 +124,20 @@ export class VisualWorld {
     const cam = this.camera;
     this.fx.update(dt);
 
-    // 背景桌台色
-    ctx.fillStyle = '#20302c';
+    // 昼夜推进（现实时间；暂停时冻结）
+    if (!paused) {
+      this.dayClock += dt;
+      this.updateEnv(dt, W, H);
+    }
+    const dayPhase = (this.dayClock % CFG.daySeconds) / CFG.daySeconds;
+    const night = nightFactor(dayPhase);
+
+    // 居民智能体推进
+    this.agents.update(w, Math.min(0.05, dt), dayPhase, paused);
+
+    // 背景桌台色（夜里更深）
+    const deskR = 32 - night * 10, deskG = 48 - night * 14, deskB = 44 - night * 12;
+    ctx.fillStyle = `rgb(${deskR | 0},${deskG | 0},${deskB | 0})`;
     ctx.fillRect(0, 0, W, H);
 
     ctx.save();
@@ -119,15 +146,14 @@ export class VisualWorld {
     ctx.translate(-cam.x, -cam.y);
 
     const size = w.config.size;
-    // 视口世界像素范围
     const halfW = W / 2 / cam.zoom, halfH = H / 2 / cam.zoom;
     const wx0 = cam.x - halfW - 80, wx1 = cam.x + halfW + 80;
-    const wy0 = cam.y - halfH - 120, wy1 = cam.y + halfH + 160;
+    const wy0 = cam.y - halfH - 140, wy1 = cam.y + halfH + 180;
 
     const lod = cam.zoom;
     const useCache = lod < 0.8;
+    const inView = (sx: number, sy: number) => sx > wx0 - 100 && sx < wx1 + 100 && sy > wy0 - 160 && sy < wy1 + 140;
 
-    // 可见格范围（近似矩形，宽松）
     const gmin = screenToGrid(wx0 - TILE_W, wy0 - TILE_H * 2);
     const gmax = screenToGrid(wx1 + TILE_W, wy1 + TILE_H * 2);
     const x0 = clamp(Math.floor(gmin.x) - 1, 0, size - 1);
@@ -135,22 +161,41 @@ export class VisualWorld {
     const y0 = clamp(Math.floor(gmin.y) - 1, 0, size - 1);
     const y1 = clamp(Math.ceil(gmax.y) + 1, 0, size - 1);
 
-    // 1) 地形：远景用缓存贴图，近景逐格绘制
+    // 1) 地形：远景/近景均贴静态缓存（性能核心）；近景之上叠加水波动画
     if (useCache) {
       this.terrainCache.blit(ctx, w);
     } else {
-      for (let sum = x0 + y0; sum <= x1 + y1; sum++) {
-        for (let x = Math.max(x0, sum - y1); x <= Math.min(x1, sum - y0); x++) {
-          const y = sum - x;
-          if (y < y0 || y > y1) continue;
-          const t = w.tiles[y * size + x];
-          const p = gridToScreen(x, y);
-          drawTile(ctx, w, x, y, p.x, p.y, time, lod);
+      this.terrainCache.blitHi(ctx, w);
+      // 可见水面波光（动画层）
+      if (lod > 0.55) {
+        ctx.fillStyle = 'rgba(210,235,248,0.10)';
+        for (let sum = x0 + y0; sum <= x1 + y1; sum++) {
+          for (let x = Math.max(x0, sum - y1); x <= Math.min(x1, sum - y0); x++) {
+            const y = sum - x;
+            if (y < y0 || y > y1) continue;
+            const t = w.tiles[y * size + x];
+            if (t.terrain !== Terrain.Water) continue;
+            const ph = time * 0.0011 + vhash(x, y, 3) * Math.PI * 2;
+            const a = 0.06 + Math.sin(ph) * 0.05;
+            if (a <= 0) continue;
+            const cx = (x - y) * TILE_W / 2, cy = (x + y) * TILE_H / 2 - t.elevation * ELEV_H + 5;
+            ctx.fillStyle = `rgba(210,235,248,${a.toFixed(3)})`;
+            ctx.beginPath();
+            ctx.moveTo(cx - TILE_W * 0.2, cy);
+            ctx.lineTo(cx + TILE_W * 0.05, cy - TILE_H * 0.16);
+            ctx.lineTo(cx + TILE_W * 0.2, cy + TILE_H * 0.06);
+            ctx.lineTo(cx - TILE_W * 0.08, cy + TILE_H * 0.14);
+            ctx.closePath();
+            ctx.fill();
+          }
         }
       }
     }
 
-    // 2) 领地边界（两种模式下都画，可见范围即可）
+    // 2) 持久印记（坟墓/陨坑/焦痕/废墟；视口裁剪 + 批量绘制）
+    drawDecals(ctx, w, lod, (sx, sy) => inView(sx, sy));
+
+    // 3) 领地边界
     if (lod > 0.55) {
       for (let y = y0; y <= y1; y++) {
         for (let x = x0; x <= x1; x++) {
@@ -160,66 +205,47 @@ export class VisualWorld {
       }
     }
 
-    // 3) 建筑与小人（统一 y 排序）
+    // 4) 建筑与小人（统一 y 排序；海拔感知：站地表面）
+    beginLights();
     interface Drawable { depth: number; draw: () => void }
     const drawables: Drawable[] = [];
-    const inView = (sx: number, sy: number) => sx > wx0 - 80 && sx < wx1 + 80 && sy > wy0 - 120 && sy < wy1 + 100;
 
     for (const s of w.settlements) {
       const all = [...s.buildings, ...s.construction];
       for (const b of all) {
+        const e = elevAt(w, b.x, b.y);
         const p = gridToScreen(b.x, b.y);
-        if (!inView(p.x, p.y)) continue;
+        const by = p.y - e * ELEV_H;
+        if (!inView(p.x, by)) continue;
         drawables.push({
           depth: b.x + b.y + (b.kind === BuildingKind.Farm ? -0.4 : 0),
-          draw: () => drawBuilding(ctx, w, b, p.x, p.y, time, lod),
+          draw: () => drawBuilding(ctx, w, b, p.x, by, time, lod, night),
         });
       }
     }
 
-    for (const s of w.settlements) {
-      if (s.dead) {
-        // 废墟标记
-        const p = gridToScreen(s.x, s.y);
-        if (inView(p.x, p.y)) {
-          drawables.push({
-            depth: s.x + s.y,
-            draw: () => {
-              ctx.fillStyle = 'rgba(70,60,50,0.5)';
-              for (let i = 0; i < 4; i++) {
-                const a = i * 1.7 + 0.5;
-                ctx.fillRect(p.x + Math.cos(a) * 10 - 3, p.y + Math.sin(a) * 5 - 2, 6, 4);
-              }
-            },
-          });
-        }
-        this.villagers.delete(s.id);
-        continue;
-      }
-      let list = this.villagers.get(s.id);
-      const want = spawnCountFor(s);
-      if (!list) {
-        list = spawnVillagers(w, s);
-        this.villagers.set(s.id, list);
-      } else if (list.length !== want) {
-        // 人口变化 → 重新生成
-        list = spawnVillagers(w, s);
-        this.villagers.set(s.id, list);
-      }
-      if (!paused || Math.random() < 0.5) updateVillagers(list, w, s, Math.min(0.05, dt));
-      const vp = gridToScreen(s.x, s.y);
-      if (inView(vp.x - 60, vp.y - 60) || inView(vp.x + 60, vp.y + 60)) {
+    // 小人：远景批量绘制（性能核心）；近景逐个 y 排序绘制
+    this.agents.resetDetailBudget();
+    const batchFar = lod < 1.5;
+    if (!batchFar) {
+      for (const a of this.agents.agents) {
+        if (a.state === 'sleep') continue;
+        const p = gridToScreen(a.gx, a.gy);
+        const ay = p.y - elevAt(w, a.gx, a.gy) * ELEV_H;
+        if (!inView(p.x, ay)) continue;
         drawables.push({
-          depth: 1e9 + s.id, // 小人最后画，避免被建筑完全遮挡的边界情况
-          draw: () => drawVillagers(ctx, list!, time, lod),
+          depth: a.gx + a.gy,
+          draw: () => this.agents.drawOne(ctx, w, a, lod, night, time),
         });
       }
     }
 
     drawables.sort((a, b) => a.depth - b.depth);
     for (const d of drawables) d.draw();
+    // 远景：小人批量绘制（在建筑之后，颜色分组单次填充）
+    if (batchFar) this.agents.drawBatched(ctx, w, night, time);
 
-    // 4) 天气（雨/旱的区域视觉）
+    // 5) 天气（雨/旱的区域视觉）
     if (lod > 0.35) {
       for (let y = y0; y <= y1; y += 1) {
         for (let x = x0; x <= x1; x += 1) {
@@ -232,10 +258,10 @@ export class VisualWorld {
       }
     }
 
-    // 5) 事件特效
+    // 6) 事件特效
     this.fx.draw(ctx, w, time);
 
-    // 6) 祝福特效（聚落上空金色微光）
+    // 7) 祝福特效
     for (const s of w.settlements) {
       if (s.dead || !s.effects.some(e => e.kind === 'blessing')) continue;
       const p = gridToScreen(s.x, s.y);
@@ -243,7 +269,7 @@ export class VisualWorld {
       drawBlessing(ctx, p.x, p.y, time);
     }
 
-    // 7) 事件 ping
+    // 8) 事件 ping
     for (const ping of this.pings) {
       ping.ttl -= dt;
       if (ping.ttl <= 0) continue;
@@ -257,9 +283,42 @@ export class VisualWorld {
     }
     this.pings = this.pings.filter(p => p.ttl > 0);
 
+    // 9) 灯火（在暗幕之下先收集完，之后再叠加）
     ctx.restore();
 
-    // 8) 全局雨幕氛围（屏幕空间）
+    // 10) 昼夜暗幕（屏幕空间；微缩沙盘不至于全黑）
+    if (night > 0.02) {
+      const a = night * 0.44;
+      const grd = ctx.createLinearGradient(0, 0, 0, H);
+      grd.addColorStop(0, `rgba(14,20,44,${a.toFixed(3)})`);
+      grd.addColorStop(0.6, `rgba(16,24,52,${(a * 0.9).toFixed(3)})`);
+      grd.addColorStop(1, `rgba(10,16,40,${(a * 0.8).toFixed(3)})`);
+      ctx.fillStyle = grd;
+      ctx.fillRect(0, 0, W, H);
+    }
+
+    // 11) 灯火合成层（窗光/篝火/火把，叠加在暗幕之上）
+    if (night > 0.22 && lod > 0.5) {
+      ctx.save();
+      ctx.translate(W / 2, H / 2);
+      ctx.scale(cam.zoom, cam.zoom);
+      ctx.translate(-cam.x, -cam.y);
+      ctx.globalCompositeOperation = 'lighter';
+      for (const L of collectLights()) {
+        if (!inView(L.x, L.y)) continue;
+        const g = ctx.createRadialGradient(L.x, L.y, 0, L.x, L.y, L.r);
+        g.addColorStop(0, L.c);
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = g;
+        ctx.beginPath();
+        ctx.arc(L.x, L.y, L.r, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.restore();
+    }
+
+    // 12) 全局雨幕氛围
     let rainTiles = 0;
     for (let y = y0; y <= y1; y += 2) for (let x = x0; x <= x1; x += 2) {
       if (w.weather[y * size + x]?.wet > 0.5) rainTiles++;
@@ -269,7 +328,7 @@ export class VisualWorld {
       ctx.fillRect(0, 0, W, H);
     }
 
-    // 9) 闪光反馈（神力/闪电）
+    // 13) 闪光反馈（神力/闪电）
     const flashFx = this.fx.flash;
     if (flashFx && flashFx.alpha > 0.01) {
       ctx.fillStyle = flashFx.color.replace(')', ',$a)').replace('rgb', 'rgba').replace('$a', String(flashFx.alpha));
@@ -281,7 +340,19 @@ export class VisualWorld {
       this.flashOverlay.alpha *= Math.pow(0.02, dt);
     }
 
-    // 10) 笔刷光标
+    // 14) 云影（缓慢漂移的大块软影）
+    for (const c of this.clouds) {
+      const cx = c.x * W, cy = c.y * H;
+      ctx.fillStyle = `rgba(24,32,44,${c.a})`;
+      ctx.beginPath();
+      ctx.ellipse(cx, cy, c.r, c.r * 0.5, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // 15) 飞鸟（屏幕空间掠过的雁阵）
+    this.drawBirds(ctx, dt, W, H, paused);
+
+    // 16) 笔刷光标
     if (this.hoverTile) {
       const { x, y } = this.hoverTile;
       if (x >= 0 && y >= 0 && x < size && y < size) {
@@ -294,7 +365,7 @@ export class VisualWorld {
       }
     }
 
-    // 11) 聚落标签（纯屏幕空间：字号恒定 + 防重叠）
+    // 17) 聚落标签（纯屏幕空间：字号恒定 + 防重叠）
     type Label = { sx: number; sy: number; text: string; strong: boolean; pop: number };
     const labels: Label[] = [];
     for (const s of w.settlements) {
@@ -305,7 +376,6 @@ export class VisualWorld {
       const text = s.dead ? '废墟' : `${s.name} · ${s.population}人`;
       labels.push({ sx, sy: sy - 14, text, strong: !s.dead, pop: s.dead ? 0 : s.population });
     }
-    // 按人口降序：大聚落优先显示；重叠的小标签被跳过
     labels.sort((a, b) => b.pop - a.pop);
     ctx.font = '600 12px "PingFang SC", "Noto Sans SC", "Microsoft YaHei", sans-serif';
     const taken: { x0: number; x1: number; y0: number; y1: number }[] = [];
@@ -331,8 +401,62 @@ export class VisualWorld {
       ctx.restore();
     }
 
+    // 18) 时段角标（清晨/白昼/黄昏/夜晚）
+    const slotName = ['夜', '晨', '昼', '暮'][daySlot(dayPhase)];
+    ctx.font = '600 11px "PingFang SC", "Noto Sans SC", sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillStyle = 'rgba(24,32,28,0.55)';
+    roundRect(ctx, 12, H - 30, 64, 20, 8);
+    ctx.fill();
+    ctx.fillStyle = night > 0.4 ? '#9aa8c8' : '#e8dfc8';
+    ctx.fillText(`${slotName} · ${night > 0.4 ? '入夜' : '天光'}`, 20, H - 19);
+
     // 小地图
     this.drawMinimap(w, W, H, time);
+  }
+
+  /** 云影漂移 + 偶发雁阵 */
+  private updateEnv(dt: number, W: number, H: number) {
+    for (const c of this.clouds) {
+      c.x += c.s * dt * 0.12;
+      if (c.x * W - c.r > W) c.x = -c.r / W;
+    }
+    if (this.birds.length === 0 && Math.random() < dt * 0.02) {
+      const fromLeft = Math.random() > 0.5;
+      const y = 30 + Math.random() * (H * 0.4);
+      const n = 3 + ((Math.random() * 4) | 0);
+      for (let i = 0; i < n; i++) {
+        this.birds.push({
+          x: fromLeft ? -30 - i * 18 : W + 30 + i * 18,
+          y: y + Math.sin(i * 1.3) * 14,
+          vx: (fromLeft ? 1 : -1) * (46 + Math.random() * 18),
+          vy: (Math.random() - 0.3) * 8,
+          ph: Math.random() * Math.PI * 2,
+          life: 40,
+        });
+      }
+    }
+    for (const b of this.birds) {
+      b.x += b.vx * dt;
+      b.y += b.vy * dt + Math.sin(b.ph) * 0.2;
+      b.ph += dt * 9;
+      b.life -= dt;
+    }
+    this.birds = this.birds.filter(b => b.life > 0);
+  }
+
+  private drawBirds(ctx: CanvasRenderingContext2D, dt: number, W: number, H: number, paused: number | boolean) {
+    if (!this.birds.length) return;
+    ctx.strokeStyle = 'rgba(40,44,52,0.6)';
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    for (const b of this.birds) {
+      const flap = Math.sin(b.ph) * 3;
+      ctx.moveTo(b.x - 4, b.y - flap);
+      ctx.quadraticCurveTo(b.x, b.y + 1.6, b.x + 4, b.y - flap);
+    }
+    ctx.stroke();
+    void dt; void W; void H; void paused;
   }
 
   private drawMinimap(w: WorldState, W: number, H: number, time: number) {
@@ -355,13 +479,11 @@ export class VisualWorld {
         }
       }
       mc.putImageData(img, 0, 0);
-      // 聚落点覆盖（低频成本）
       for (const s of w.settlements) {
         mc.fillStyle = s.dead ? '#8a8a8a' : '#ffd66e';
         mc.fillRect(s.x - 1, s.y - 1, 3, 3);
       }
     }
-    // 把小地图绘制到主画布右下角 + 视口框（裁剪在小地图范围内）
     const ctx = this.ctx;
     const mmW = 148, mmH = 148;
     const ox = W - mmW - 14, oy = H - mmH - 14;
@@ -375,7 +497,6 @@ export class VisualWorld {
     ctx.fill();
     ctx.imageSmoothingEnabled = false;
     ctx.drawImage(this.minimap, ox, oy, mmW, mmH);
-    // 视口框
     const halfW = W / 2 / this.camera.zoom, halfH = H / 2 / this.camera.zoom;
     const c = {
       mx: ox + mmW / 2 + this.camera.x * (mmW / (size * TILE_W)) * 2,
@@ -388,11 +509,6 @@ export class VisualWorld {
     ctx.strokeRect(c.mx - vw / 2, c.my - vh / 2, vw, vh);
     ctx.restore();
   }
-}
-
-function spawnCountFor(s: Settlement): number {
-  if (s.dead || s.population <= 0) return 0;
-  return Math.max(4, Math.min(26, Math.round(s.population * 0.045)));
 }
 
 function minimapRGB(t: { terrain: Terrain; ore: boolean }): [number, number, number] {
@@ -432,7 +548,6 @@ function drawDrought(ctx: CanvasRenderingContext2D, sx: number, sy: number) {
   ctx.lineTo(sx - TILE_W / 2 + 3, sy);
   ctx.closePath();
   ctx.fill();
-  // 热浪线
   ctx.strokeStyle = 'rgba(230,190,120,0.25)';
   ctx.lineWidth = 1;
   ctx.beginPath();
@@ -478,7 +593,6 @@ function drawBrushCursor(ctx: CanvasRenderingContext2D, cx: number, cy: number, 
     ctx.fill();
   }
   ctx.restore();
-  // 中心格描边
   const p = gridToScreen(cx, cy);
   ctx.strokeStyle = color;
   ctx.lineWidth = 2;

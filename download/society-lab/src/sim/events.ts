@@ -233,6 +233,7 @@ export const EVENT_DEFS: EventDef[] = [
         effects: [`双方约 ${dead + Math.round(dead * 0.8)} 人死亡`, `${captives} 名俘虏进入强制劳动`, '战争记忆加深'],
         severity: 0.6,
         settlementId: winner.id,
+        aux: { attackerId: a.id, defenderId: b.id },
       };
     },
   },

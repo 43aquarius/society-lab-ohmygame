@@ -77,7 +77,7 @@ export function castBrushPower(w: WorldState, id: GodPowerId, cx: number, cy: nu
       if (x < 0 || y < 0 || x >= size || y >= size) continue;
       const t = w.tiles[y * size + x];
       if (t.terrain === Terrain.Mountain && id !== 'ore' && id !== 'water' && id !== 'meadow' && id !== 'uplift') continue;
-      if (t.terrain === Terrain.Water && id !== 'fertile' && id !== 'forest' && id !== 'uplift') continue;
+      if (t.terrain === Terrain.Water && id !== 'fertile' && id !== 'forest' && id !== 'uplift' && id !== 'rain' && id !== 'drought' && id !== 'storm') continue;
       touched++;
       switch (id) {
         case 'forest':
@@ -119,14 +119,12 @@ export function castBrushPower(w: WorldState, id: GodPowerId, cx: number, cy: nu
             t.terrain = Terrain.Hills;
             t.elevation = 2;
             t.fertility = 0.2;
-          } else if (t.elevation >= 3) {
-            t.terrain = Terrain.Mountain;
-          } else if (t.elevation >= 1) {
-            t.elevation = Math.min(4, t.elevation + 2);
-            t.terrain = t.elevation >= 3 ? Terrain.Mountain : Terrain.Hills;
+          } else if (t.elevation >= 5) {
+            // 已是高山：再抬一级（封顶 6）
+            t.elevation = Math.min(6, t.elevation + 1);
           } else {
-            t.elevation = 2;
-            t.terrain = Terrain.Hills;
+            t.elevation = Math.min(6, t.elevation + 2);
+            t.terrain = t.elevation >= 5 ? Terrain.Mountain : t.elevation >= 3 ? Terrain.Hills : t.terrain;
           }
           t.fertility = Math.min(t.fertility, 0.15);
           break;

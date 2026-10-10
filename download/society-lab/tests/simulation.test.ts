@@ -10,6 +10,7 @@ import { classifySociety } from '../src/sim/society.ts';
 import { serialize, deserialize } from '../src/saves.ts';
 import { castBrushPower, castCivPower } from '../src/powers.ts';
 import { Terrain, type WorldState, type SocietyForm } from '../src/types.ts';
+import { CFG } from '../src/config.ts';
 
 function world(seed = 12345, scenario: 'dawn' | 'valley' = 'valley' as any): WorldState {
   return newWorld({ seed, size: 48, mode: 'free', settlements: 1, scenario });
@@ -198,7 +199,7 @@ test('存档往返保持世界一致', () => {
   for (let i = 0; i < 25; i++) tickYear(w);
   const json = serialize(w, '测试世界');
   const parsed = JSON.parse(json);
-  assert.equal(parsed.version, 2);
+  assert.equal(parsed.version, CFG.saveVersion);
   const res = deserialize(json);
   assert.ok('world' in res, `应可解析: ${JSON.stringify(res)}`);
   if ('world' in res) {

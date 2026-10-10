@@ -1,8 +1,9 @@
 /**
- * VisualWorld 地形渲染 — 精致微缩沙盘风格（v2.0）
- * - 静态地形离屏缓存（半分辨率一次成图），远景直接贴图，支撑 128×128 大地图
- * - 近景（zoom ≥ 0.8）逐格实时绘制：精细树冠 / 山体棱线 / 矿闪 / 花田
- * - 水面：深度渐变 + 岸线泡沫 + 动画波光
+ * VisualWorld 地形渲染 — 精致微缩沙盘风格（v3.0）
+ * - 海拔 0..6：悬崖侧壁深度 = 与最低邻格的高差，山体呈阶梯状拔起
+ * - 雪线（海拔 ≥5），山麓岩层，河床下切形成的河谷
+ * - 高大树木（远大于小人）、风摆、落叶
+ * - 静态地形离屏缓存（半分辨率一次成图），远景直接贴图
  */
 import { Terrain, type Tile, type WorldState } from '../types';
 import { TILE_W, TILE_H, ELEV_H, vhash } from './iso';
@@ -81,9 +82,15 @@ function landNeighbors(w: WorldState, x: number, y: number): number {
   return n;
 }
 
+function elevOf(w: WorldState, x: number, y: number): number {
+  const size = w.config.size;
+  if (x < 0 || y < 0 || x >= size || y >= size) return 0;
+  return w.tiles[y * size + x].elevation;
+}
+
 /**
- * 绘制一个菱形地块（含侧壁与地形细节）。
- * ctx 已应用摄像机变换；wx, wy 为该格中心的世界像素。
+ * 绘制一个菱形地块（含悬崖侧壁与地形细节）。
+ * ctx 已应用摄像机变换；wx, wy 为该格中心的世界像素（不含海拔）。
  * animated=false 供缓存成图（跳过时间相关的波光）。
  */
 export function drawTile(
@@ -97,41 +104,71 @@ export function drawTile(
 ) {
   const t = w.tiles[y * w.config.size + x];
   const hw = TILE_W / 2, hh = TILE_H / 2;
+  const elev = t.elevation;
 
   // 水面低于地面
   const waterOffset = t.terrain === Terrain.Water ? 5 : 0;
-  const cx = wx, cy = wy - t.elevation * ELEV_H + waterOffset;
+  const cx = wx, cy = wy - elev * ELEV_H + waterOffset;
 
-  // 侧壁（所有陆地格都有薄土裙边，消除菱形接缝；高海拔更深）
   if (t.terrain !== Terrain.Water) {
-    const d = t.elevation >= 1 ? t.elevation * ELEV_H + 3 : 2.5;
-    ctx.fillStyle = t.elevation >= 3 ? 'rgb(104,84,66)' : PALETTE.side;
-    ctx.beginPath();
-    ctx.moveTo(cx - hw - 0.6, cy);
-    ctx.lineTo(cx, cy + hh + 0.4);
-    ctx.lineTo(cx, cy + hh + d + 0.4);
-    ctx.lineTo(cx - hw - 0.6, cy + d);
-    ctx.closePath();
-    ctx.fill();
-    ctx.fillStyle = t.elevation >= 3 ? 'rgb(88,70,54)' : 'rgb(94,74,54)';
-    ctx.beginPath();
-    ctx.moveTo(cx + hw + 0.6, cy);
-    ctx.lineTo(cx, cy + hh + 0.4);
-    ctx.lineTo(cx, cy + hh + d + 0.4);
-    ctx.lineTo(cx + hw + 0.6, cy + d);
-    ctx.closePath();
-    ctx.fill();
-    // 侧壁土层纹理（近景）
-    if (lod > 1.1) {
-      ctx.strokeStyle = 'rgba(60,44,32,0.28)';
-      ctx.lineWidth = 0.8;
+    // 悬崖侧壁：深度 = 本格与最低邻格的高差（真实落差）
+    const nMin = Math.min(
+      elevOf(w, x + 1, y), elevOf(w, x - 1, y),
+      elevOf(w, x, y + 1), elevOf(w, x, y - 1),
+    );
+    const drop = Math.max(0, elev - nMin);
+    const d = drop > 0 ? drop * ELEV_H : 2.5;
+    if (d > 2.6) {
+      // 左壁（向阳面稍亮）
+      ctx.fillStyle = elev >= 4 ? 'rgb(122,98,76)' : 'rgb(118,92,66)';
       ctx.beginPath();
-      const sd = Math.min(d, 7);
-      ctx.moveTo(cx - hw * 0.6, cy + sd * 0.5);
-      ctx.lineTo(cx - hw * 0.1, cy + hh * 0.6 + sd * 0.5);
-      ctx.moveTo(cx + hw * 0.25, cy + sd * 0.7);
-      ctx.lineTo(cx + hw * 0.7, cy + sd * 0.4);
-      ctx.stroke();
+      ctx.moveTo(cx - hw - 0.6, cy);
+      ctx.lineTo(cx, cy + hh + 0.4);
+      ctx.lineTo(cx, cy + hh + d + 0.4);
+      ctx.lineTo(cx - hw - 0.6, cy + d);
+      ctx.closePath();
+      ctx.fill();
+      // 右壁（背光面暗）
+      ctx.fillStyle = elev >= 4 ? 'rgb(96,74,56)' : 'rgb(92,70,50)';
+      ctx.beginPath();
+      ctx.moveTo(cx + hw + 0.6, cy);
+      ctx.lineTo(cx, cy + hh + 0.4);
+      ctx.lineTo(cx, cy + hh + d + 0.4);
+      ctx.lineTo(cx + hw + 0.6, cy + d);
+      ctx.closePath();
+      ctx.fill();
+      // 岩层纹理（悬崖上水平层理）
+      if (lod > 0.55 && drop >= 1) {
+        ctx.strokeStyle = 'rgba(58,44,32,0.30)';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        for (let s = 1; s < drop; s++) {
+          const ly = cy + s * ELEV_H;
+          ctx.moveTo(cx - hw * 0.92, ly);
+          ctx.lineTo(cx - hw * 0.1, ly + hh * 0.82);
+          ctx.moveTo(cx + hw * 0.25, ly + hh * 0.2);
+          ctx.lineTo(cx + hw * 0.92, ly - hh * 0.02);
+        }
+        ctx.stroke();
+      }
+    } else {
+      // 平地薄土裙边（消除菱形接缝）
+      ctx.fillStyle = 'rgb(112,88,64)';
+      ctx.beginPath();
+      ctx.moveTo(cx - hw - 0.6, cy);
+      ctx.lineTo(cx, cy + hh + 0.4);
+      ctx.lineTo(cx, cy + hh + 3);
+      ctx.lineTo(cx - hw - 0.6, cy + 2.5);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = 'rgb(94,74,54)';
+      ctx.beginPath();
+      ctx.moveTo(cx + hw + 0.6, cy);
+      ctx.lineTo(cx, cy + hh + 0.4);
+      ctx.lineTo(cx, cy + hh + 3);
+      ctx.lineTo(cx + hw + 0.6, cy + 2.5);
+      ctx.closePath();
+      ctx.fill();
     }
   } else {
     // 水岸：面向陆地的水下暗边，塑造河床
@@ -192,6 +229,24 @@ export function drawTile(
         ctx.closePath();
         ctx.fill();
       }
+      // 瀑布：河床跌落处画白色水痕
+      if (lod > 0.5 && elev > 0) {
+        const below = Math.min(
+          elevOf(w, x + 1, y), elevOf(w, x - 1, y),
+          elevOf(w, x, y + 1), elevOf(w, x, y - 1),
+        );
+        if (below < elev) {
+          const ph = animated ? time * 0.004 : 0;
+          ctx.strokeStyle = `rgba(226,240,248,${0.55 + Math.sin(ph) * 0.12})`;
+          ctx.lineWidth = 3.2;
+          ctx.beginPath();
+          ctx.moveTo(cx + hw * 0.3, cy + hh * 0.4);
+          ctx.lineTo(cx + hw * 0.52, cy + hh * 0.4 + (elev - below) * ELEV_H);
+          ctx.moveTo(cx - hw * 0.1, cy + hh * 0.6);
+          ctx.lineTo(cx + hw * 0.12, cy + hh * 0.6 + (elev - below) * ELEV_H * 0.9);
+          ctx.stroke();
+        }
+      }
       break;
     }
     case Terrain.Grass: {
@@ -203,7 +258,7 @@ export function drawTile(
       break;
     }
     case Terrain.Forest: {
-      if (lod > 0.45) drawTrees(ctx, x, y, cx, cy, lod);
+      if (lod > 0.45) drawTrees(ctx, x, y, cx, cy, lod, animated ? time : 0);
       else if (lod > 0.3) {
         ctx.fillStyle = PALETTE.forestTree[0][1];
         ctx.beginPath();
@@ -217,11 +272,23 @@ export function drawTile(
       break;
     }
     case Terrain.Mountain:
-      drawMountain(ctx, x, y, cx, cy, lod);
+      drawMountain(ctx, x, y, cx, cy, lod, elev);
       break;
     case Terrain.Rock:
       if (lod > 0.6) drawRocks(ctx, x, y, cx, cy);
       break;
+  }
+
+  // 雪线（高海拔顶面覆雪）
+  if (t.terrain !== Terrain.Water && (elev >= 5 || (elev === 4 && vhash(x, y, 5) > 0.55))) {
+    ctx.fillStyle = 'rgba(244,241,235,0.88)';
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - hh * 0.7);
+    ctx.lineTo(cx + hw * 0.75, cy);
+    ctx.lineTo(cx, cy + hh * 0.7);
+    ctx.lineTo(cx - hw * 0.75, cy);
+    ctx.closePath();
+    ctx.fill();
   }
 
   // 矿脉标识
@@ -293,41 +360,44 @@ function drawFurrows(ctx: CanvasRenderingContext2D, x: number, y: number, cx: nu
 const hw2 = () => TILE_W / 2;
 const hh2 = () => TILE_H / 2;
 
-/** 精细树：三种形态（阔叶/松柏/白桦），三色树冠 + 树干 + 高光 */
-function drawTrees(ctx: CanvasRenderingContext2D, x: number, y: number, cx: number, cy: number, lod: number) {
-  const positions = [[-14, 2], [8, -4], [-2, 8], [12, 8], [-12, -6]];
+/** v3.0 精细树：高大（22~36px，约 2 倍小人身高），三种形态，风摆，近景落叶 */
+function drawTrees(ctx: CanvasRenderingContext2D, x: number, y: number, cx: number, cy: number, lod: number, time: number) {
+  const positions = [[-15, 3], [9, -5], [-3, 9], [13, 9], [-13, -7]];
   const n = 2 + ((vhash(x, y, 51) * 3) | 0);
+  const wind = time ? Math.sin(time * 0.0011 + x * 0.7 + y * 0.4) * 1.6 : 0;
   for (let i = 0; i < n && i < positions.length; i++) {
     const [ox, oy] = positions[i];
     const variant = (vhash(x, y, 57 + i) * 3) | 0;
-    const hgt = 14 + vhash(x, y, 61 + i) * 9;
+    const big = vhash(x, y, 63 + i) > 0.62;
+    const hgt = (big ? 30 : 22) + vhash(x, y, 61 + i) * 8;
     const tx = cx + ox, ty = cy + oy;
     const cols = PALETTE.forestTree[variant];
     // 阴影
     ctx.fillStyle = 'rgba(40,60,40,0.25)';
     ctx.beginPath();
-    ctx.ellipse(tx + 2.5, ty + 3, 7.5, 3.5, 0, 0, Math.PI * 2);
+    ctx.ellipse(tx + 3, ty + 3.5, 9, 4, 0, 0, Math.PI * 2);
     ctx.fill();
     // 树干（带根部展开）
     ctx.fillStyle = variant === 2 ? 'rgb(178,166,140)' : 'rgb(94,66,44)';
     ctx.beginPath();
-    ctx.moveTo(tx - 2.4, ty + 1.5);
-    ctx.lineTo(tx - 1.4, ty - hgt * 0.42);
-    ctx.lineTo(tx + 1.4, ty - hgt * 0.42);
-    ctx.lineTo(tx + 2.4, ty + 1.5);
+    ctx.moveTo(tx - 3, ty + 1.5);
+    ctx.lineTo(tx - 1.8, ty - hgt * 0.44);
+    ctx.lineTo(tx + 1.8, ty - hgt * 0.44);
+    ctx.lineTo(tx + 3, ty + 1.5);
     ctx.closePath();
     ctx.fill();
-    // 树冠
+    // 树冠（随风轻摆）
+    const sx = wind * (0.4 + i * 0.18);
     ctx.fillStyle = cols[1];
     if (variant === 1) {
       // 松柏：三层叠锥
       for (let l = 0; l < 3; l++) {
-        const ly = ty - hgt * (0.32 + l * 0.24);
-        const lw = 9 - l * 2.2;
+        const ly = ty - hgt * (0.34 + l * 0.24);
+        const lw = 12 - l * 3;
         ctx.beginPath();
-        ctx.moveTo(tx, ly - hgt * 0.34);
-        ctx.lineTo(tx + lw, ly);
-        ctx.lineTo(tx - lw, ly);
+        ctx.moveTo(tx + sx, ly - hgt * 0.36);
+        ctx.lineTo(tx + sx + lw, ly);
+        ctx.lineTo(tx + sx - lw, ly);
         ctx.closePath();
         ctx.fillStyle = l === 2 ? cols[0] : cols[1];
         ctx.fill();
@@ -336,35 +406,35 @@ function drawTrees(ctx: CanvasRenderingContext2D, x: number, y: number, cx: numb
       // 阔叶/白桦：两团椭圆 + 主团
       ctx.fillStyle = cols[1];
       ctx.beginPath();
-      ctx.ellipse(tx - 3.5, ty - hgt * 0.52, 6.5, 5, -0.3, 0, Math.PI * 2);
+      ctx.ellipse(tx + sx - 4.5, ty - hgt * 0.56, 8.5, 6.5, -0.3, 0, Math.PI * 2);
       ctx.fill();
       ctx.fillStyle = cols[0];
       ctx.beginPath();
-      ctx.ellipse(tx + 3, ty - hgt * 0.58, 6.5, 5, 0.2, 0, Math.PI * 2);
+      ctx.ellipse(tx + sx + 4, ty - hgt * 0.62, 8.5, 6.5, 0.2, 0, Math.PI * 2);
       ctx.fill();
       ctx.fillStyle = cols[0];
       ctx.beginPath();
-      ctx.moveTo(tx, ty - hgt);
-      ctx.quadraticCurveTo(tx + 9, ty - hgt * 0.55, tx + 2, ty - hgt * 0.4);
-      ctx.quadraticCurveTo(tx - 9, ty - hgt * 0.55, tx, ty - hgt);
+      ctx.moveTo(tx + sx, ty - hgt);
+      ctx.quadraticCurveTo(tx + sx + 11, ty - hgt * 0.56, tx + sx + 2.5, ty - hgt * 0.4);
+      ctx.quadraticCurveTo(tx + sx - 11, ty - hgt * 0.56, tx + sx, ty - hgt);
       ctx.fill();
     }
     // 高光（受光面）
     ctx.fillStyle = 'rgba(255,255,220,0.14)';
     ctx.beginPath();
-    ctx.moveTo(tx, ty - hgt);
-    ctx.quadraticCurveTo(tx + 5, ty - hgt * 0.55, tx + 3, ty - hgt * 0.42);
-    ctx.quadraticCurveTo(tx - 1, ty - hgt * 0.6, tx, ty - hgt);
+    ctx.moveTo(tx + sx, ty - hgt);
+    ctx.quadraticCurveTo(tx + sx + 6, ty - hgt * 0.56, tx + sx + 3.5, ty - hgt * 0.42);
+    ctx.quadraticCurveTo(tx + sx - 1, ty - hgt * 0.6, tx + sx, ty - hgt);
     ctx.fill();
     // 近景下的枝条描线
     if (lod > 1.2) {
       ctx.strokeStyle = 'rgba(30,50,34,0.35)';
       ctx.lineWidth = 0.7;
       ctx.beginPath();
-      ctx.moveTo(tx, ty - hgt * 0.5);
-      ctx.lineTo(tx + 4.5, ty - hgt * 0.66);
-      ctx.moveTo(tx, ty - hgt * 0.62);
-      ctx.lineTo(tx - 4, ty - hgt * 0.74);
+      ctx.moveTo(tx + sx, ty - hgt * 0.5);
+      ctx.lineTo(tx + sx + 5.5, ty - hgt * 0.66);
+      ctx.moveTo(tx + sx, ty - hgt * 0.62);
+      ctx.lineTo(tx + sx - 4.5, ty - hgt * 0.74);
       ctx.stroke();
     }
   }
@@ -389,28 +459,24 @@ function drawHillContours(ctx: CanvasRenderingContext2D, x: number, y: number, c
   }
 }
 
-function drawMountain(ctx: CanvasRenderingContext2D, x: number, y: number, cx: number, cy: number, lod: number) {
+/** v3.0 山体：阶梯海拔块已由侧壁呈现，这里画岩峰棱线与雪顶 */
+function drawMountain(ctx: CanvasRenderingContext2D, x: number, y: number, cx: number, cy: number, lod: number, elev: number) {
   const h = vhash(x, y, 81);
-  const hgt = 30 + h * 22;
-  const wHalf = 24 + h * 8;
-  // 山影
-  ctx.fillStyle = 'rgba(52,48,46,0.28)';
+  const hgt = 16 + h * 14 + elev * 3;
+  const wHalf = 18 + h * 7;
+  // 岩峰剪影（叠在阶梯地形块上，营造尖峰）
+  ctx.fillStyle = 'rgb(150,142,130)';
   ctx.beginPath();
-  ctx.ellipse(cx + 3, cy + 6, wHalf * 0.9, 9, 0, 0, Math.PI * 2);
-  ctx.fill();
-  // 山体：两面 + 棱线
-  ctx.fillStyle = 'rgb(156,148,136)';
-  ctx.beginPath();
-  ctx.moveTo(cx, cy - hgt + 10);
-  ctx.lineTo(cx + wHalf, cy + 8);
-  ctx.lineTo(cx - wHalf, cy + 8);
+  ctx.moveTo(cx, cy - hgt + 6);
+  ctx.lineTo(cx + wHalf, cy + 6);
+  ctx.lineTo(cx - wHalf, cy + 6);
   ctx.closePath();
   ctx.fill();
-  ctx.fillStyle = 'rgb(128,120,110)';
+  ctx.fillStyle = 'rgb(126,118,108)';
   ctx.beginPath();
-  ctx.moveTo(cx, cy - hgt + 10);
-  ctx.lineTo(cx + wHalf, cy + 8);
-  ctx.lineTo(cx + wHalf * 0.15, cy + 8);
+  ctx.moveTo(cx, cy - hgt + 6);
+  ctx.lineTo(cx + wHalf, cy + 6);
+  ctx.lineTo(cx + wHalf * 0.15, cy + 6);
   ctx.closePath();
   ctx.fill();
   // 岩层纹理（近景）
@@ -419,7 +485,7 @@ function drawMountain(ctx: CanvasRenderingContext2D, x: number, y: number, cx: n
     ctx.lineWidth = 1;
     ctx.beginPath();
     for (let i = 1; i <= 3; i++) {
-      const ly = cy - hgt + 12 + i * hgt * 0.2;
+      const ly = cy - hgt + 8 + i * hgt * 0.2;
       const lw = wHalf * (1 - i * 0.22);
       ctx.moveTo(cx - lw * 0.7, ly);
       ctx.lineTo(cx - lw * 0.1, ly - 3);
@@ -427,24 +493,24 @@ function drawMountain(ctx: CanvasRenderingContext2D, x: number, y: number, cx: n
     }
     ctx.stroke();
   }
-  // 雪顶
-  if (lod > 0.5) {
+  // 雪顶（高海拔必雪）
+  if (elev >= 5 || (lod > 0.5 && h > 0.4)) {
     ctx.fillStyle = PALETTE.snow;
     ctx.beginPath();
-    ctx.moveTo(cx, cy - hgt + 10);
-    ctx.lineTo(cx + wHalf * 0.36, cy - hgt * 0.42);
-    ctx.lineTo(cx + wHalf * 0.2, cy - hgt * 0.34);
-    ctx.lineTo(cx + wHalf * 0.05, cy - hgt * 0.45);
-    ctx.lineTo(cx - wHalf * 0.18, cy - hgt * 0.36);
-    ctx.lineTo(cx - wHalf * 0.36, cy - hgt * 0.44);
+    ctx.moveTo(cx, cy - hgt + 6);
+    ctx.lineTo(cx + wHalf * 0.36, cy - hgt * 0.42 + 6);
+    ctx.lineTo(cx + wHalf * 0.2, cy - hgt * 0.34 + 6);
+    ctx.lineTo(cx + wHalf * 0.05, cy - hgt * 0.45 + 6);
+    ctx.lineTo(cx - wHalf * 0.18, cy - hgt * 0.36 + 6);
+    ctx.lineTo(cx - wHalf * 0.36, cy - hgt * 0.44 + 6);
     ctx.closePath();
     ctx.fill();
     if (lod > 1.0) {
       ctx.fillStyle = 'rgba(210,224,232,0.7)';
       ctx.beginPath();
-      ctx.moveTo(cx, cy - hgt + 10);
-      ctx.lineTo(cx + wHalf * 0.2, cy - hgt * 0.34);
-      ctx.lineTo(cx + wHalf * 0.06, cy - hgt * 0.36);
+      ctx.moveTo(cx, cy - hgt + 6);
+      ctx.lineTo(cx + wHalf * 0.2, cy - hgt * 0.34 + 6);
+      ctx.lineTo(cx + wHalf * 0.06, cy - hgt * 0.36 + 6);
       ctx.closePath();
       ctx.fill();
     }
@@ -512,47 +578,65 @@ export function drawBorders(ctx: CanvasRenderingContext2D, w: WorldState, x: num
   ctx.stroke();
 }
 
-// ============ 静态地形缓存（远景大地图性能） ============
+// ============ 静态地形缓存（性能核心） ============
 
 export class TerrainCache {
-  canvas: HTMLCanvasElement | null = null;
+  canvas: HTMLCanvasElement | null = null;   // 远景（0.5 倍）
+  hi: HTMLCanvasElement | null = null;        // 近景（0.8 倍）—— v3.0：中高缩放直接贴图
   dirty = true;
-  private scale = 0.5;
+  private loScale = 0.5;
+  private hiScale = 0.8;
 
-  /** 生成/重建缓存（整图一次成图，半分辨率） */
-  build(w: WorldState) {
+  /** 生成/重建缓存（整图一次成图） */
+  private buildInto(cv: HTMLCanvasElement | null, w: WorldState, scale: number): HTMLCanvasElement {
     const size = w.config.size;
-    const worldW = size * TILE_W, worldH = size * TILE_H + ELEV_H * 6;
-    const s = this.scale;
-    const cv = this.canvas ?? document.createElement('canvas');
-    const cw = Math.ceil(worldW * s), ch = Math.ceil(worldH * s);
-    if (cv.width !== cw || cv.height !== ch) {
-      cv.width = cw; cv.height = ch;
+    const worldW = size * TILE_W, worldH = size * TILE_H + ELEV_H * 8;
+    const c2 = cv ?? document.createElement('canvas');
+    const cw = Math.ceil(worldW * scale), ch = Math.ceil(worldH * scale);
+    if (c2.width !== cw || c2.height !== ch) {
+      c2.width = cw; c2.height = ch;
     }
-    const c = cv.getContext('2d')!;
+    const c = c2.getContext('2d')!;
     c.setTransform(1, 0, 0, 1, 0, 0);
     c.clearRect(0, 0, cw, ch);
-    c.scale(s, s);
-    // 世界像素 → 缓存像素：cacheX = worldX + worldW/2；世界原点 y=0 在山体之上留 ELEV 余量
-    c.translate(worldW / 2, ELEV_H * 3);
+    c.scale(scale, scale);
+    c.translate(worldW / 2, ELEV_H * 5);
     for (let sum = 0; sum <= 2 * (size - 1); sum++) {
       for (let x = Math.max(0, sum - size + 1); x <= Math.min(size - 1, sum); x++) {
         const y = sum - x;
-        const t = w.tiles[y * size + x];
         const p = { x: (x - y) * TILE_W / 2, y: (x + y) * TILE_H / 2 };
         drawTile(c, w, x, y, p.x, p.y, 0, 0.9, false);
-        if (t.ore) { /* 矿闪在缓存中已绘制 */ }
       }
     }
-    this.canvas = cv;
+    return c2;
+  }
+
+  /** 生成/重建远景缓存（半分辨率） */
+  build(w: WorldState) {
+    this.canvas = this.buildInto(this.canvas, w, this.loScale);
     this.dirty = false;
   }
 
-  /** 贴图（ctx 需已应用世界变换） */
+  /** 生成/重建近景缓存（0.8 倍；首次在中高缩放时构建，一次性成本） */
+  buildHi(w: WorldState) {
+    this.hi = this.buildInto(this.hi, w, this.hiScale);
+    this.dirty = false;
+  }
+
+  /** 远景贴图（ctx 需已应用世界变换） */
   blit(ctx: CanvasRenderingContext2D, w: WorldState) {
     if (!this.canvas || this.dirty) this.build(w);
     const size = w.config.size;
     const worldW = size * TILE_W, worldH = size * TILE_H;
-    ctx.drawImage(this.canvas!, -worldW / 2, -ELEV_H * 3, worldW, worldH + ELEV_H * 6);
+    ctx.drawImage(this.canvas!, -worldW / 2, -ELEV_H * 5, worldW, worldH + ELEV_H * 8);
+  }
+
+  /** 近景贴图（0.8 缩放构建、按目标尺寸放大，视觉无损级） */
+  blitHi(ctx: CanvasRenderingContext2D, w: WorldState) {
+    if (!this.hi || this.dirty) this.buildHi(w);
+    const size = w.config.size;
+    const worldW = size * TILE_W, worldH = size * TILE_H;
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(this.hi!, -worldW / 2, -ELEV_H * 5, worldW, worldH + ELEV_H * 8);
   }
 }

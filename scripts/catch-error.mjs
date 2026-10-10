@@ -1,0 +1,10 @@
+import { chromium } from '/home/z/.npm-global/lib/node_modules/playwright/index.mjs';
+const browser = await chromium.launch({ headless: true });
+const page = await browser.newPage();
+page.on('pageerror', e => console.log('PAGEERROR:', e.message));
+page.on('response', r => { if (r.status() >= 400) console.log('HTTP', r.status(), r.url()); });
+await page.goto('http://localhost:3000/game/index.html');
+await page.waitForTimeout(4000);
+console.log('game obj:', await page.evaluate(() => typeof window.__game));
+console.log('app html len:', await page.evaluate(() => document.getElementById('app').innerHTML.length));
+await browser.close();

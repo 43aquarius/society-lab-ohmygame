@@ -1,0 +1,826 @@
+     1→/**
+     2→ * 建筑渲染 — 程序化等距建筑
+     3→ * 每种建筑有独特剪影与时代色板；建造中的脚手架；
+     4→ * 农田作物随年度周期生长。
+     5→ */
+     6→import { BuildingKind, type Building, type WorldState } from '../types';
+     7→import { TILE_W, TILE_H, ELEV_H, vhash } from './iso';
+     8→
+     9→export interface BuildingPalette {
+    10→  wood: string; woodDark: string; roof: string; roofDark: string;
+    11→  stone: string; stoneDark: string; accent: string; cloth: string;
+    12→}
+    13→
+    14→const P = (wood: string, roof: string, stone = 'rgb(168,162,152)', accent = 'rgb(194,120,60)', cloth = 'rgb(224,200,150)'): BuildingPalette => ({
+    15→  wood, woodDark: shade(wood, 0.72), roof, roofDark: shade(roof, 0.7),
+    16→  stone, stoneDark: shade(stone, 0.72), accent, cloth,
+    17→});
+    18→
+    19→function shade(rgb: string, f: number): string {
+    20→  const m = rgb.match(/rgb\((\d+),(\d+),(\d+)\)/);
+    21→  if (!m) return rgb;
+    22→  return `rgb(${(+m[1]) * f | 0},${(+m[2]) * f | 0},${(+m[3]) * f | 0})`;
+    23→}
+    24→
+    25→export const PALETTES: Record<number, BuildingPalette> = {
+    26→  0: P('rgb(148,116,80)', 'rgb(201,162,94)'),          // 原始：茅草
+    27→  1: P('rgb(140,108,72)', 'rgb(178,120,70)'),          // 农业：木瓦
+    28→  2: P('rgb(132,102,70)', 'rgb(156,86,60)', 'rgb(178,172,160)'), // 城镇：陶瓦
+    29→  3: P('rgb(120,96,84)', 'rgb(88,88,100)', 'rgb(150,146,140)', 'rgb(80,96,120)'), // 工业：砖与铁
+    30→  4: P('rgb(150,140,128)', 'rgb(90,110,116)', 'rgb(196,192,184)', 'rgb(47,126,118)'), // 现代：水泥与青
+    31→};
+    32→
+    33→/** 建筑占地面积（格）：多数 1 格，大型 2 格 */
+    34→function footprint(kind: BuildingKind): { w: number; d: number } {
+    35→  switch (kind) {
+    36→    case BuildingKind.Admin: return { w: 1.6, d: 1.4 };
+    37→    case BuildingKind.Factory: return { w: 1.8, d: 1.6 };
+    38→    case BuildingKind.Services: return { w: 1.5, d: 1.3 };
+    39→    case BuildingKind.Cooperative: return { w: 1.4, d: 1.2 };
+    40→    case BuildingKind.Market: return { w: 1.5, d: 1.2 };
+    41→    case BuildingKind.Castle: return { w: 1.7, d: 1.5 };
+    42→    case BuildingKind.Manor: return { w: 1.6, d: 1.4 };
+    43→    case BuildingKind.Temple: return { w: 1.5, d: 1.3 };
+    44→    case BuildingKind.Academy: return { w: 1.3, d: 1.1 };
+    45→    case BuildingKind.Bank: return { w: 1.3, d: 1.1 };
+    46→    case BuildingKind.Theater: return { w: 1.4, d: 1.3 };
+    47→    case BuildingKind.Hospital: return { w: 1.2, d: 1.1 };
+    48→    case BuildingKind.Wall: return { w: 1.6, d: 0.7 };
+    49→    default: return { w: 1, d: 1 };
+    50→  }
+    51→}
+    52→
+    53→/** 等距立方体：中心 (cx,cy)（地面），格尺寸 (gw, gd)，高 hp 像素 */
+    54→function box(ctx: CanvasRenderingContext2D, cx: number, cy: number, gw: number, gd: number, hp: number, top: string, left: string, right: string) {
+    55→  const hw = (gw * TILE_W) / 2, hd = (gd * TILE_H) / 2;
+    56→  // 左面
+    57→  ctx.fillStyle = left;
+    58→  ctx.beginPath();
+    59→  ctx.moveTo(cx - hw, cy);
+    60→  ctx.lineTo(cx, cy + hd);
+    61→  ctx.lineTo(cx, cy + hd - hp);
+    62→  ctx.lineTo(cx - hw, cy - hp);
+    63→  ctx.closePath();
+    64→  ctx.fill();
+    65→  // 右面
+    66→  ctx.fillStyle = right;
+    67→  ctx.beginPath();
+    68→  ctx.moveTo(cx + hw, cy);
+    69→  ctx.lineTo(cx, cy + hd);
+    70→  ctx.lineTo(cx, cy + hd - hp);
+    71→  ctx.lineTo(cx + hw, cy - hp);
+    72→  ctx.closePath();
+    73→  ctx.fill();
+    74→  // 顶面
+    75→  ctx.fillStyle = top;
+    76→  ctx.beginPath();
+    77→  ctx.moveTo(cx, cy - hp - hd);
+    78→  ctx.lineTo(cx + hw, cy - hp);
+    79→  ctx.lineTo(cx, cy - hp + hd);
+    80→  ctx.lineTo(cx - hw, cy - hp);
+    81→  ctx.closePath();
+    82→  ctx.fill();
+    83→  return { topY: cy - hp - hd, hw, hd };
+    84→}
+    85→
+    86→/** 双坡屋顶 */
+    87→function gableRoof(ctx: CanvasRenderingContext2D, cx: number, cy: number, gw: number, gd: number, hp: number, hrh: number, pal: BuildingPalette, flip = false) {
+    88→  const hw = (gw * TILE_W) / 2, hd = (gd * TILE_H) / 2;
+    89→  const peak = hp + hrh;
+    90→  if (!flip) {
+    91→    // 屋脊沿 SW-NE（左右两面）
+    92→    ctx.fillStyle = pal.roof;
+    93→    ctx.beginPath();
+    94→    ctx.moveTo(cx, cy + hd - peak);
+    95→    ctx.lineTo(cx + hw, cy - peak);
+    96→    ctx.lineTo(cx + hw, cy - hp);
+    97→    ctx.lineTo(cx, cy + hd - hp);
+    98→    ctx.closePath();
+    99→    ctx.fill();
+   100→    ctx.fillStyle = pal.roofDark;
+   101→    ctx.beginPath();
+   102→    ctx.moveTo(cx, cy + hd - peak);
+   103→    ctx.lineTo(cx - hw, cy - peak);
+   104→    ctx.lineTo(cx - hw, cy - hp);
+   105→    ctx.lineTo(cx, cy + hd - hp);
+   106→    ctx.closePath();
+   107→    ctx.fill();
+   108→  } else {
+   109→    ctx.fillStyle = pal.roof;
+   110→    ctx.beginPath();
+   111→    ctx.moveTo(cx, cy - hd - peak + hd);
+   112→    ctx.lineTo(cx + hw, cy - peak);
+   113→    ctx.lineTo(cx, cy + hd - peak + hd);
+   114→    ctx.closePath();
+   115→    ctx.fill();
+   116→  }
+   117→}
+   118→
+   119→function shadow(ctx: CanvasRenderingContext2D, cx: number, cy: number, gw: number, gd: number) {
+   120→  const hw = (gw * TILE_W) / 2 + 3, hd = (gd * TILE_H) / 2 + 2;
+   121→  ctx.fillStyle = 'rgba(40,52,44,0.22)';
+   122→  ctx.beginPath();
+   123→  ctx.ellipse(cx + 2, cy + 2, hw * 0.8, hd * 0.8, 0, 0, Math.PI * 2);
+   124→  ctx.fill();
+   125→}
+   126→
+   127→/** 烟囱烟雾 */
+   128→function smoke(ctx: CanvasRenderingContext2D, cx: number, cy: number, topY: number, time: number, seed: number, intensity = 1) {
+   129→  const n = 3;
+   130→  for (let i = 0; i < n; i++) {
+   131→    const ph = (time * 0.0004 + i / n + seed) % 1;
+   132→    const a = (1 - ph) * 0.28 * intensity;
+   133→    const r = 2.5 + ph * 7;
+   134→    ctx.fillStyle = `rgba(220,222,226,${a.toFixed(3)})`;
+   135→    ctx.beginPath();
+   136→    ctx.arc(cx + Math.sin(ph * 6 + seed * 9) * 4, topY - ph * 26, r, 0, Math.PI * 2);
+   137→    ctx.fill();
+   138→  }
+   139→}
+   140→
+   141→/**
+   142→ * 绘制建筑。sx, sy 为建筑所在格的地面世界像素中心。
+   143→ * time 毫秒用于动画（炊烟等）。
+   144→ */
+   145→export function drawBuilding(
+   146→  ctx: CanvasRenderingContext2D,
+   147→  w: WorldState,
+   148→  b: Building,
+   149→  sx: number, sy: number,
+   150→  time: number,
+   151→  lod: number,
+   152→) {
+   153→  const era = eraOf(w, b);
+   154→  const pal = PALETTES[era];
+   155→  const fp = footprint(b.kind);
+   156→  const seed = vhash(b.x, b.y, 5);
+   157→
+   158→  // 建造中：脚手架 + 半成品
+   159→  if (b.progress < 1) {
+   160→    shadow(ctx, sx, sy, fp.w, fp.d);
+   161→    ctx.globalAlpha = 0.35 + b.progress * 0.6;
+   162→    drawCompleted(ctx, w, b, sx, sy, time, era, pal, seed, lod, true);
+   163→    ctx.globalAlpha = 1;
+   164→    // 脚手架线条
+   165→    ctx.strokeStyle = 'rgba(120,90,56,0.8)';
+   166→    ctx.lineWidth = 1.5;
+   167→    const hw = (fp.w * TILE_W) / 2, hd = (fp.d * TILE_H) / 2;
+   168→    ctx.beginPath();
+   169→    ctx.moveTo(sx - hw, sy); ctx.lineTo(sx, sy + hd); ctx.lineTo(sx, sy + hd - 22); ctx.lineTo(sx - hw, sy - 22); ctx.closePath();
+   170→    ctx.moveTo(sx + hw, sy); ctx.lineTo(sx, sy + hd); ctx.lineTo(sx, sy + hd - 22); ctx.lineTo(sx + hw, sy - 22); ctx.closePath();
+   171→    ctx.stroke();
+   172→    return;
+   173→  }
+   174→  shadow(ctx, sx, sy, fp.w, fp.d);
+   175→  drawCompleted(ctx, w, b, sx, sy, time, era, pal, seed, lod, false);
+   176→}
+   177→
+   178→function drawCompleted(
+   179→  ctx: CanvasRenderingContext2D,
+   180→  w: WorldState,
+   181→  b: Building,
+   182→  sx: number, sy: number,
+   183→  time: number,
+   184→  era: number,
+   185→  pal: BuildingPalette,
+   186→  seed: number,
+   187→  lod: number,
+   188→  ghost: boolean,
+   189→) {
+   190→  switch (b.kind) {
+   191→    case BuildingKind.Camp: {
+   192→      // 帐篷 + 篝火
+   193→      const h = 16;
+   194→      ctx.fillStyle = 'rgba(40,52,44,0.2)';
+   195→      ctx.beginPath(); ctx.ellipse(sx, sy + 2, 20, 9, 0, 0, Math.PI * 2); ctx.fill();
+   196→      ctx.fillStyle = pal.cloth;
+   197→      ctx.beginPath();
+   198→      ctx.moveTo(sx - 2, sy + 8);
+   199→      ctx.lineTo(sx - 16, sy - h);
+   200→      ctx.lineTo(sx + 2, sy - h - 2);
+   201→      ctx.closePath();
+   202→      ctx.fill();
+   203→      ctx.fillStyle = pal.roof;
+   204→      ctx.beginPath();
+   205→      ctx.moveTo(sx + 2, sy + 8);
+   206→      ctx.lineTo(sx + 14, sy - h + 2);
+   207→      ctx.lineTo(sx + 2, sy - h - 2);
+   208→      ctx.closePath();
+   209→      ctx.fill();
+   210→      ctx.fillStyle = 'rgba(60,42,26,0.85)';
+   211→      ctx.beginPath();
+   212→      ctx.moveTo(sx - 2, sy + 8); ctx.lineTo(sx - 9, sy - h + 8); ctx.lineTo(sx + 2, sy - h - 2);
+   213→      ctx.closePath(); ctx.fill();
+   214→      if (!ghost && lod > 0.5) {
+   215→        // 篝火
+   216→        const fl = 3 + Math.sin(time * 0.008 + seed * 9) * 1.4;
+   217→        ctx.fillStyle = 'rgb(224,120,50)';
+   218→        ctx.beginPath();
+   219→        ctx.ellipse(sx + 14, sy + 6, 3, fl, 0, 0, Math.PI * 2); ctx.fill();
+   220→        ctx.fillStyle = 'rgba(255,206,90,0.75)';
+   221→        ctx.beginPath();
+   222→        ctx.ellipse(sx + 14, sy + 5, 1.6, fl * 0.55, 0, 0, Math.PI * 2); ctx.fill();
+   223→      }
+   224→      break;
+   225→    }
+   226→    case BuildingKind.Shelter: {
+   227→      // 窝棚：树枝斜搭 + 茅草（v2.0 更精细：骨架线条 + 茅草层次）
+   228→      shadow(ctx, sx, sy, 0.7, 0.7);
+   229→      const h = 13;
+   230→      ctx.strokeStyle = pal.woodDark;
+   231→      ctx.lineWidth = 1.6;
+   232→      ctx.beginPath();
+   233→      ctx.moveTo(sx - 10, sy + 5); ctx.lineTo(sx - 2, sy - h);
+   234→      ctx.moveTo(sx + 10, sy + 5); ctx.lineTo(sx + 2, sy - h);
+   235→      ctx.moveTo(sx - 7, sy + 1); ctx.lineTo(sx + 1, sy - h + 3);
+   236→      ctx.stroke();
+   237→      // 茅草面（两片，带茅草簇）
+   238→      ctx.fillStyle = pal.roof;
+   239→      ctx.beginPath();
+   240→      ctx.moveTo(sx - 2, sy + 7); ctx.lineTo(sx - 13, sy - h + 2); ctx.lineTo(sx + 1, sy - h - 1);
+   241→      ctx.closePath(); ctx.fill();
+   242→      ctx.fillStyle = pal.roofDark;
+   243→      ctx.beginPath();
+   244→      ctx.moveTo(sx + 2, sy + 7); ctx.lineTo(sx + 12, sy - h + 3); ctx.lineTo(sx + 2, sy - h - 1);
+   245→      ctx.closePath(); ctx.fill();
+   246→      // 茅草纹理
+   247→      ctx.strokeStyle = 'rgba(120,96,52,0.5)';
+   248→      ctx.lineWidth = 0.7;
+   249→      ctx.beginPath();
+   250→      for (let i = 0; i < 3; i++) {
+   251→        ctx.moveTo(sx - 9 + i * 3, sy - h * 0.35 + i);
+   252→        ctx.lineTo(sx - 6 + i * 3, sy - h * 0.62 + i);
+   253→      }
+   254→      ctx.stroke();
+   255→      break;
+   256→    }
+   257→    case BuildingKind.House: {
+   258→      // 农舍 v2.0：木板墙纹理 + 双窗 + 门廊
+   259→      box(ctx, sx, sy, 0.85, 0.85, 14, pal.wood, pal.woodDark, shade(pal.wood, 0.85));
+   260→      // 木板横纹
+   261→      ctx.strokeStyle = 'rgba(90,64,42,0.35)';
+   262→      ctx.lineWidth = 0.8;
+   263→      ctx.beginPath();
+   264→      for (let i = 1; i <= 3; i++) {
+   265→        const yy = sy - 2 - i * 3;
+   266→        ctx.moveTo(sx - 13, yy - 13.5); ctx.lineTo(sx, yy - 19.5);
+   267→        ctx.moveTo(sx + 13, yy - 13.5); ctx.lineTo(sx, yy - 19.5);
+   268→      }
+   269→      ctx.stroke();
+   270→      gableRoof(ctx, sx, sy, 0.95, 0.95, 14, 8, pal);
+   271→      if (lod > 0.7) {
+   272→        ctx.fillStyle = 'rgba(255,214,140,0.85)';
+   273→        ctx.fillRect(sx + 4, sy - 8, 4, 4);
+   274→        ctx.fillRect(sx - 9, sy - 11, 3.5, 3.5);
+   275→        ctx.fillStyle = pal.woodDark;
+   276→        ctx.fillRect(sx - 5, sy - 5, 5, 6);
+   277→        ctx.fillStyle = 'rgba(40,30,20,0.5)';
+   278→        ctx.fillRect(sx - 5, sy - 5, 5, 1.2); // 门楣阴影
+   279→      }
+   280→      if (!ghost && lod > 0.6) smoke(ctx, sx - 6, sy, sy - 26, time, seed, 0.5);
+   281→      break;
+   282→    }
+   283→    case BuildingKind.Townhouse: {
+   284→      box(ctx, sx, sy, 0.8, 0.8, 30, pal.stone, pal.stoneDark, shade(pal.stone, 0.8));
+   285→      // 砖缝
+   286→      ctx.strokeStyle = 'rgba(90,88,84,0.3)';
+   287→      ctx.lineWidth = 0.7;
+   288→      ctx.beginPath();
+   289→      for (let i = 1; i <= 7; i++) {
+   290→        const yy = sy - i * 3.4;
+   291→        ctx.moveTo(sx - 12.5, yy - 12); ctx.lineTo(sx, yy - 17.5);
+   292→        ctx.moveTo(sx + 12.5, yy - 12); ctx.lineTo(sx, yy - 17.5);
+   293→      }
+   294→      ctx.stroke();
+   295→      gableRoof(ctx, sx, sy, 0.9, 0.9, 30, 9, pal);
+   296→      if (lod > 0.65) {
+   297→        for (let i = 0; i < 3; i++) {
+   298→          ctx.fillStyle = i % 2 ? 'rgba(255,214,140,0.85)' : 'rgba(150,170,180,0.8)';
+   299→          ctx.fillRect(sx + 4, sy - 6 - i * 9, 4, 4);
+   300→          ctx.fillRect(sx - 8, sy - 6 - i * 9, 4, 4);
+   301→        }
+   302→      }
+   303→      break;
+   304→    }
+   305→    case BuildingKind.Farm: {
+   306→      // 田垄与作物：随年内周期生长
+   307→      const growth = cropGrowth(w, b);
+   308→      drawField(ctx, sx, sy, growth, seed);
+   309→      break;
+   310→    }
+   311→    case BuildingKind.Granary: {
+   312→      // 架高粮仓
+   313→      ctx.strokeStyle = pal.woodDark;
+   314→      ctx.lineWidth = 2.5;
+   315→      ctx.beginPath();
+   316→      ctx.moveTo(sx - 12, sy + 4); ctx.lineTo(sx - 12, sy - 6);
+   317→      ctx.moveTo(sx + 12, sy + 4); ctx.lineTo(sx + 12, sy - 6);
+   318→      ctx.stroke();
+   319→      box(ctx, sx, sy - 6, 0.75, 0.75, 10, pal.wood, pal.woodDark, shade(pal.wood, 0.85));
+   320→      gableRoof(ctx, sx, sy - 6, 0.85, 0.85, 10, 7, pal);
+   321→      if (lod > 0.65) {
+   322→        ctx.fillStyle = 'rgb(224,196,120)';
+   323→        ctx.beginPath();
+   324→        ctx.ellipse(sx + 14, sy + 2, 3.5, 2.2, 0, 0, Math.PI * 2);
+   325→        ctx.fill();
+   326→      }
+   327→      break;
+   328→    }
+   329→    case BuildingKind.Well: {
+   330→      ctx.fillStyle = pal.stone;
+   331→      ctx.beginPath();
+   332→      ctx.ellipse(sx, sy, 9, 5, 0, 0, Math.PI * 2);
+   333→      ctx.fill();
+   334→      ctx.fillStyle = 'rgb(72,110,140)';
+   335→      ctx.beginPath();
+   336→      ctx.ellipse(sx, sy, 5.5, 3, 0, 0, Math.PI * 2);
+   337→      ctx.fill();
+   338→      ctx.strokeStyle = pal.woodDark;
+   339→      ctx.lineWidth = 2;
+   340→      ctx.beginPath();
+   341→      ctx.moveTo(sx - 7, sy); ctx.lineTo(sx - 4, sy - 14);
+   342→      ctx.moveTo(sx + 7, sy); ctx.lineTo(sx + 4, sy - 14);
+   343→      ctx.moveTo(sx - 5, sy - 13); ctx.lineTo(sx + 5, sy - 13);
+   344→      ctx.stroke();
+   345→      ctx.fillStyle = pal.roof;
+   346→      ctx.beginPath();
+   347→      ctx.moveTo(sx - 8, sy - 13); ctx.lineTo(sx, sy - 19); ctx.lineTo(sx + 8, sy - 13);
+   348→      ctx.closePath(); ctx.fill();
+   349→      break;
+   350→    }
+   351→    case BuildingKind.Workshop: {
+   352→      box(ctx, sx, sy, 0.9, 0.9, 16, pal.wood, pal.woodDark, shade(pal.wood, 0.82));
+   353→      gableRoof(ctx, sx, sy, 1.0, 1.0, 16, 8, pal);
+   354→      box(ctx, sx + 10, sy - 4, 0.22, 0.22, 22, pal.stone, pal.stoneDark, pal.stone);
+   355→      if (!ghost) smoke(ctx, sx + 10, sy - 4, sy - 30, time, seed);
+   356→      if (lod > 0.7) {
+   357→        ctx.fillStyle = pal.accent;
+   358→        ctx.fillRect(sx - 6, sy - 3, 4, 4); // 工件
+   359→      }
+   360→      break;
+   361→    }
+   362→    case BuildingKind.Market: {
+   363→      // 帐篷摊位
+   364→      const posts: [number, number][] = [[-16, 0], [0, 8], [16, 0], [0, -8]];
+   365→      ctx.strokeStyle = pal.woodDark;
+   366→      ctx.lineWidth = 2;
+   367→      for (const [px, py] of posts) {
+   368→        ctx.beginPath(); ctx.moveTo(sx + px, sy + py); ctx.lineTo(sx + px, sy + py - 12); ctx.stroke();
+   369→      }
+   370→      // 条纹顶
+   371→      for (let i = 0; i < 6; i++) {
+   372→        ctx.fillStyle = i % 2 ? pal.roof : pal.cloth;
+   373→        const t0 = i / 6, t1 = (i + 1) / 6;
+   374→        const ax = -16 + t0 * 32, ay = -8 + t0 * 16;
+   375→        const bx = -16 + t1 * 32, by = -8 + t1 * 16;
+   376→        const cx2 = -16 + t0 * 32, cy2 = 8 - t0 * 16;
+   377→        const dx = -16 + t1 * 32, dy = 8 - t1 * 16;
+   378→        ctx.beginPath();
+   379→        ctx.moveTo(sx + ax, sy + ay - 12);
+   380→        ctx.lineTo(sx + bx, sy + by - 12);
+   381→        ctx.lineTo(sx + dx, sy + dy - 12);
+   382→        ctx.lineTo(sx + cx2, sy + cy2 - 12);
+   383→        ctx.closePath();
+   384→        ctx.fill();
+   385→      }
+   386→      if (lod > 0.6) {
+   387→        ctx.fillStyle = pal.accent;
+   388→        ctx.beginPath(); ctx.ellipse(sx - 6, sy + 3, 3, 2, 0, 0, Math.PI * 2); ctx.fill();
+   389→        ctx.fillStyle = 'rgb(178,96,70)';
+   390→        ctx.beginPath(); ctx.ellipse(sx + 7, sy + 1, 3, 2, 0, 0, Math.PI * 2); ctx.fill();
+   391→      }
+   392→      break;
+   393→    }
+   394→    case BuildingKind.Admin: {
+   395→      // 台基 + 柱廊 + 旗帜
+   396→      box(ctx, sx, sy, 1.5, 1.3, 6, pal.stone, pal.stoneDark, shade(pal.stone, 0.8));
+   397→      box(ctx, sx, sy - 6, 1.3, 1.1, 20, pal.wood, pal.woodDark, shade(pal.wood, 0.8));
+   398→      gableRoof(ctx, sx, sy - 6, 1.45, 1.25, 20, 10, pal);
+   399→      if (lod > 0.55) {
+   400→        ctx.strokeStyle = pal.cloth;
+   401→        ctx.lineWidth = 2;
+   402→        ctx.beginPath();
+   403→        ctx.moveTo(sx, sy - 34);
+   404→        ctx.lineTo(sx, sy - 48);
+   405→        ctx.stroke();
+   406→        const wave = Math.sin(time * 0.004 + seed * 7) * 2;
+   407→        ctx.fillStyle = 'rgb(178,86,70)';
+   408→        ctx.beginPath();
+   409→        ctx.moveTo(sx, sy - 48);
+   410→        ctx.lineTo(sx + 12 + wave, sy - 45);
+   411→        ctx.lineTo(sx, sy - 40);
+   412→        ctx.closePath(); ctx.fill();
+   413→      }
+   414→      break;
+   415→    }
+   416→    case BuildingKind.Wall: {
+   417→      const fpw = footprint(BuildingKind.Wall);
+   418→      box(ctx, sx, sy, fpw.w, fpw.d, 12, pal.stone, pal.stoneDark, shade(pal.stone, 0.78));
+   419→      // 城齿
+   420→      ctx.fillStyle = pal.stone;
+   421→      for (let i = -2; i <= 2; i++) {
+   422→        const ox = i * 9, oy = -Math.abs(i) * 3.4;
+   423→        ctx.fillRect(sx + ox - 3, sy + oy - 16, 6, 6);
+   424→      }
+   425→      break;
+   426→    }
+   427→    case BuildingKind.Factory: {
+   428→      box(ctx, sx, sy, 1.7, 1.5, 24, 'rgb(150,96,84)', 'rgb(118,74,64)', 'rgb(132,82,70)');
+   429→      // 锯齿屋顶
+   430→      ctx.fillStyle = 'rgb(96,100,112)';
+   431→      for (let i = -1; i <= 1; i++) {
+   432→        ctx.beginPath();
+   433→        ctx.moveTo(sx + i * 22 - 8, sy - 30);
+   434→        ctx.lineTo(sx + i * 22 + 8, sy - 30);
+   435→        ctx.lineTo(sx + i * 22 + 8, sy - 38);
+   436→        ctx.closePath();
+   437→        ctx.fill();
+   438→      }
+   439→      box(ctx, sx - 24, sy - 6, 0.24, 0.24, 34, 'rgb(88,88,96)', 'rgb(70,70,78)', 'rgb(78,78,86)');
+   440→      box(ctx, sx + 22, sy - 10, 0.24, 0.24, 28, 'rgb(88,88,96)', 'rgb(70,70,78)', 'rgb(78,78,86)');
+   441→      if (!ghost) {
+   442→        smoke(ctx, sx - 24, sy - 6, sy - 44, time, seed, 1.4);
+   443→        smoke(ctx, sx + 22, sy - 10, sy - 40, time, seed + 0.4, 1.2);
+   444→      }
+   445→      if (lod > 0.6) {
+   446→        ctx.fillStyle = 'rgba(255,214,140,0.9)';
+   447→        ctx.fillRect(sx - 6, sy - 10, 5, 5);
+   448→        ctx.fillRect(sx + 4, sy - 10, 5, 5);
+   449→      }
+   450→      break;
+   451→    }
+   452→    case BuildingKind.Cooperative: {
+   453→      box(ctx, sx, sy, 1.35, 1.15, 18, pal.stone, pal.stoneDark, shade(pal.stone, 0.8));
+   454→      gableRoof(ctx, sx, sy, 1.5, 1.3, 18, 9, pal);
+   455→      if (lod > 0.55) {
+   456→        // 圆结社徽
+   457→        ctx.strokeStyle = 'rgb(47,126,118)';
+   458→        ctx.lineWidth = 2;
+   459→        ctx.beginPath();
+   460→        ctx.arc(sx, sy - 24, 5, 0, Math.PI * 2);
+   461→        ctx.stroke();
+   462→        ctx.beginPath();
+   463→        ctx.arc(sx - 4.5, sy - 24, 2.2, 0, Math.PI * 2);
+   464→        ctx.arc(sx + 4.5, sy - 24, 2.2, 0, Math.PI * 2);
+   465→        ctx.stroke();
+   466→      }
+   467→      break;
+   468→    }
+   469→    case BuildingKind.Services: {
+   470→      box(ctx, sx, sy, 1.45, 1.25, 22, pal.stone, pal.stoneDark, shade(pal.stone, 0.82));
+   471→      gableRoof(ctx, sx, sy, 1.6, 1.4, 22, 8, pal);
+   472→      if (lod > 0.55) {
+   473→        // 生命树标识
+   474→        ctx.fillStyle = 'rgb(47,126,118)';
+   475→        ctx.fillRect(sx - 1, sy - 36, 2, 8);
+   476→        ctx.beginPath();
+   477→        ctx.ellipse(sx, sy - 38, 5, 3.4, 0, 0, Math.PI * 2);
+   478→        ctx.fill();
+   479→      }
+   480→      break;
+   481→    }
+   482→    // ============ v2.0 时代建筑 ============
+   483→    case BuildingKind.Temple: {
+   484→      // 神庙：三级台基 + 柱廊 + 金顶
+   485→      box(ctx, sx, sy, 1.4, 1.2, 4, pal.stone, pal.stoneDark, shade(pal.stone, 0.8));
+   486→      box(ctx, sx, sy - 4, 1.25, 1.05, 3, shade(pal.stone, 0.94), pal.stoneDark, shade(pal.stone, 0.84));
+   487→      box(ctx, sx, sy - 7, 1.1, 0.9, 14, pal.stone, pal.stoneDark, shade(pal.stone, 0.82));
+   488→      // 柱廊（浅色立柱）
+   489→      if (lod > 0.5) {
+   490→        ctx.fillStyle = 'rgb(232,226,210)';
+   491→        for (let i = -2; i <= 2; i++) {
+   492→          const px = sx + i * 11;
+   493→          const py = sy - 9 + Math.abs(i) * -1.6;
+   494→          ctx.fillRect(px - 1.6, py - 12, 3.2, 12);
+   495→        }
+   496→        ctx.fillStyle = 'rgba(180,168,146,0.6)';
+   497→        for (let i = -2; i <= 2; i++) {
+   498→          const px = sx + i * 11;
+   499→          const py = sy - 9 + Math.abs(i) * -1.6;
+   500→          ctx.fillRect(px + 0.4, py - 12, 1.2, 12);
+   501→        }
+   502→      }
+   503→      // 金色梯形顶
+   504→      ctx.fillStyle = 'rgb(214,178,84)';
+   505→      ctx.beginPath();
+   506→      ctx.moveTo(sx, sy - 34);
+   507→      ctx.lineTo(sx + 30, sy - 22);
+   508→      ctx.lineTo(sx + 24, sy - 19);
+   509→      ctx.lineTo(sx - 24, sy - 19);
+   510→      ctx.lineTo(sx - 30, sy - 22);
+   511→      ctx.closePath();
+   512→      ctx.fill();
+   513→      ctx.fillStyle = 'rgb(178,142,58)';
+   514→      ctx.beginPath();
+   515→      ctx.moveTo(sx, sy - 34);
+   516→      ctx.lineTo(sx + 30, sy - 22);
+   517→      ctx.lineTo(sx + 24, sy - 19);
+   518→      ctx.lineTo(sx, sy - 26);
+   519→      ctx.closePath();
+   520→      ctx.fill();
+   521→      // 顶饰
+   522→      ctx.fillStyle = 'rgb(240,216,140)';
+   523→      ctx.beginPath();
+   524→      ctx.arc(sx, sy - 36, 2.4, 0, Math.PI * 2);
+   525→      ctx.fill();
+   526→      if (!ghost && lod > 0.6) smoke(ctx, sx, sy - 24, sy - 52, time, seed, 0.45); // 香火
+   527→      break;
+   528→    }
+   529→    case BuildingKind.Manor: {
+   530→      // 庄园：主楼 + 厢房 + 围栏
+   531→      box(ctx, sx - 14, sy + 2, 0.7, 0.6, 10, pal.wood, pal.woodDark, shade(pal.wood, 0.84));
+   532→      gableRoof(ctx, sx - 14, sy + 2, 0.8, 0.7, 10, 6, pal);
+   533→      box(ctx, sx, sy, 1.15, 1.0, 18, pal.wood, pal.woodDark, shade(pal.wood, 0.82));
+   534→      gableRoof(ctx, sx, sy, 1.25, 1.1, 18, 9, pal);
+   535→      if (lod > 0.55) {
+   536→        // 明窗 + 大门 + 山墙装饰
+   537→        ctx.fillStyle = 'rgba(255,214,140,0.9)';
+   538→        ctx.fillRect(sx - 8, sy - 12, 4, 5);
+   539→        ctx.fillRect(sx + 4, sy - 12, 4, 5);
+   540→        ctx.fillRect(sx - 2, sy - 22, 4, 4);
+   541→        ctx.fillStyle = pal.woodDark;
+   542→        ctx.fillRect(sx - 2.5, sy - 4, 5, 6);
+   543→      }
+   544→      if (lod > 0.6) {
+   545→        // 围栏
+   546→        ctx.strokeStyle = pal.woodDark;
+   547→        ctx.lineWidth = 1.4;
+   548→        ctx.beginPath();
+   549→        for (let i = 0; i < 5; i++) {
+   550→          const fx = sx + 16 + i * 5, fy = sy + 8 - i * 2.2;
+   551→          ctx.moveTo(fx, fy); ctx.lineTo(fx, fy - 4);
+   552→        }
+   553→        ctx.moveTo(sx + 16, sy + 6.5); ctx.lineTo(sx + 36, sy - 2.5);
+   554→        ctx.stroke();
+   555→      }
+   556→      break;
+   557→    }
+   558→    case BuildingKind.Castle: {
+   559→      // 城堡：主楼 + 双塔 + 城齿 + 旗
+   560→      box(ctx, sx, sy, 1.15, 1.0, 26, pal.stone, pal.stoneDark, shade(pal.stone, 0.8));
+   561→      box(ctx, sx - 22, sy + 3, 0.45, 0.4, 34, pal.stone, pal.stoneDark, shade(pal.stone, 0.78));
+   562→      box(ctx, sx + 22, sy + 3, 0.45, 0.4, 34, pal.stone, pal.stoneDark, shade(pal.stone, 0.78));
+   563→      // 城齿（主楼与塔）
+   564→      ctx.fillStyle = pal.stone;
+   565→      for (let i = -2; i <= 2; i++) {
+   566→        ctx.fillRect(sx + i * 10 - 3.4, sy - 30 + Math.abs(i) * 2.4, 6.8, 6);
+   567→      }
+   568→      for (const tx of [sx - 22, sx + 22]) {
+   569→        for (let i = -1; i <= 1; i++) {
+   570→          ctx.fillRect(tx + i * 7 - 2.6, sy - 33 + Math.abs(i) * 2 + 3, 5.2, 5);
+   571→        }
+   572→        // 塔顶锥
+   573→        ctx.fillStyle = pal.roof;
+   574→        ctx.beginPath();
+   575→        ctx.moveTo(tx, sy - 52);
+   576→        ctx.lineTo(tx + 9, sy - 36);
+   577→        ctx.lineTo(tx - 9, sy - 36);
+   578→        ctx.closePath();
+   579→        ctx.fill();
+   580→        ctx.fillStyle = pal.roofDark;
+   581→        ctx.beginPath();
+   582→        ctx.moveTo(tx, sy - 52);
+   583→        ctx.lineTo(tx + 9, sy - 36);
+   584→        ctx.lineTo(tx, sy - 38);
+   585→        ctx.closePath();
+   586→        ctx.fill();
+   587→      }
+   588→      // 主旗
+   589→      if (lod > 0.5) {
+   590→        ctx.strokeStyle = pal.cloth;
+   591→        ctx.lineWidth = 1.8;
+   592→        ctx.beginPath();
+   593→        ctx.moveTo(sx, sy - 32); ctx.lineTo(sx, sy - 50);
+   594→        ctx.stroke();
+   595→        const wave = Math.sin(time * 0.004 + seed * 7) * 2.5;
+   596→        ctx.fillStyle = 'rgb(168,74,58)';
+   597→        ctx.beginPath();
+   598→        ctx.moveTo(sx, sy - 50);
+   599→        ctx.lineTo(sx + 14 + wave, sy - 46);
+   600→        ctx.lineTo(sx, sy - 41);
+   601→        ctx.closePath();
+   602→        ctx.fill();
+   603→        // 门与箭窗
+   604→        ctx.fillStyle = 'rgb(58,44,34)';
+   605→        ctx.fillRect(sx - 3.4, sy - 7, 6.8, 7);
+   606→        ctx.fillRect(sx - 22 - 1.5, sy - 8, 3, 4);
+   607→        ctx.fillRect(sx + 22 - 1.5, sy - 8, 3, 4);
+   608→      }
+   609→      break;
+   610→    }
+   611→    case BuildingKind.Academy: {
+   612→      // 学堂：厅堂 + 钟楼
+   613→      box(ctx, sx, sy, 1.05, 0.9, 16, 'rgb(184,142,96)', 'rgb(146,108,70)', 'rgb(162,124,84)');
+   614→      gableRoof(ctx, sx, sy, 1.15, 1.0, 16, 8, pal);
+   615→      box(ctx, sx + 18, sy - 2, 0.34, 0.3, 26, pal.stone, pal.stoneDark, shade(pal.stone, 0.82));
+   616→      // 钟楼尖顶
+   617→      ctx.fillStyle = 'rgb(70,86,110)';
+   618→      ctx.beginPath();
+   619→      ctx.moveTo(sx + 18, sy - 34);
+   620→      ctx.lineTo(sx + 26, sy - 26);
+   621→      ctx.lineTo(sx + 10, sy - 26);
+   622→      ctx.closePath();
+   623→      ctx.fill();
+   624→      if (lod > 0.55) {
+   625→        // 钟
+   626→        ctx.fillStyle = 'rgb(214,178,84)';
+   627→        ctx.beginPath();
+   628→        ctx.moveTo(sx + 16, sy - 24);
+   629→        ctx.quadraticCurveTo(sx + 18, sy - 20, sx + 20, sy - 24);
+   630→        ctx.closePath();
+   631→        ctx.fill();
+   632→        // 门窗
+   633→        ctx.fillStyle = 'rgba(255,214,140,0.85)';
+   634→        ctx.fillRect(sx - 8, sy - 12, 4, 5);
+   635→        ctx.fillRect(sx + 4, sy - 12, 4, 5);
+   636→        ctx.fillStyle = 'rgb(88,62,42)';
+   637→        ctx.fillRect(sx - 2.4, sy - 6, 4.8, 6);
+   638→        // 书卷匾额
+   639→        ctx.fillStyle = 'rgb(240,232,210)';
+   640→        ctx.fillRect(sx - 7, sy - 21, 14, 5);
+   641→        ctx.strokeStyle = 'rgb(120,100,70)';
+   642→        ctx.lineWidth = 0.8;
+   643→        ctx.strokeRect(sx - 7, sy - 21, 14, 5);
+   644→        ctx.beginPath();
+   645→        ctx.moveTo(sx - 4, sy - 19.5); ctx.lineTo(sx + 4, sy - 19.5);
+   646→        ctx.moveTo(sx - 4, sy - 17.5); ctx.lineTo(sx + 2, sy - 17.5);
+   647→        ctx.stroke();
+   648→      }
+   649→      break;
+   650→    }
+   651→    case BuildingKind.Bank: {
+   652→      // 银行：石砌殿堂 + 三角楣 + 四柱
+   653→      box(ctx, sx, sy, 1.2, 1.0, 18, pal.stone, pal.stoneDark, shade(pal.stone, 0.84));
+   654→      // 四柱
+   655→      ctx.fillStyle = 'rgb(226,220,206)';
+   656→      for (let i = 0; i < 4; i++) {
+   657→        const px = sx - 15 + i * 10;
+   658→        ctx.fillRect(px - 1.8, sy - 16 + Math.abs(i - 1.5) * -1.2, 3.6, 14);
+   659→      }
+   660→      // 檐口
+   661→      box(ctx, sx, sy - 16, 1.3, 1.1, 3, 'rgb(214,208,196)', 'rgb(178,172,160)', 'rgb(196,190,178)');
+   662→      // 三角楣
+   663→      ctx.fillStyle = 'rgb(226,220,206)';
+   664→      ctx.beginPath();
+   665→      ctx.moveTo(sx, sy - 30);
+   666→      ctx.lineTo(sx + 26, sy - 19);
+   667→      ctx.lineTo(sx - 26, sy - 19);
+   668→      ctx.closePath();
+   669→      ctx.fill();
+   670→      ctx.fillStyle = 'rgba(178,172,160,0.55)';
+   671→      ctx.beginPath();
+   672→      ctx.moveTo(sx, sy - 30);
+   673→      ctx.lineTo(sx + 26, sy - 19);
+   674→      ctx.lineTo(sx, sy - 22);
+   675→      ctx.closePath();
+   676→      ctx.fill();
+   677→      if (lod > 0.55) {
+   678→        // 门 + 金币徽记
+   679→        ctx.fillStyle = 'rgb(64,54,44)';
+   680→        ctx.fillRect(sx - 5, sy - 8, 10, 8);
+   681→        ctx.fillStyle = 'rgb(214,178,84)';
+   682→        ctx.beginPath();
+   683→        ctx.arc(sx, sy - 25, 2.6, 0, Math.PI * 2);
+   684→        ctx.fill();
+   685→        ctx.fillStyle = 'rgb(150,118,50)';
+   686→        ctx.font = '600 4px sans-serif';
+   687→        ctx.textAlign = 'center';
+   688→        ctx.fillText('¥', sx, sy - 23.8);
+   689→      }
+   690→      break;
+   691→    }
+   692→    case BuildingKind.Theater: {
+   693→      // 剧场：半环形看台 + 条纹篷
+   694→      ctx.fillStyle = 'rgb(190,168,132)';
+   695→      ctx.beginPath();
+   696→      ctx.ellipse(sx, sy, 26, 14, 0, 0, Math.PI * 2);
+   697→      ctx.fill();
+   698→      ctx.fillStyle = 'rgb(162,140,108)';
+   699→      ctx.beginPath();
+   700→      ctx.ellipse(sx, sy - 3, 21, 11, 0, 0, Math.PI * 2);
+   701→      ctx.fill();
+   702→      ctx.fillStyle = 'rgb(122,102,78)';
+   703→      ctx.beginPath();
+   704→      ctx.ellipse(sx, sy - 3, 13, 7, 0, 0, Math.PI * 2);
+   705→      ctx.fill();
+   706→      // 舞台
+   707→      ctx.fillStyle = 'rgb(214,190,150)';
+   708→      ctx.beginPath();
+   709→      ctx.ellipse(sx, sy - 3, 7, 4, 0, 0, Math.PI * 2);
+   710→      ctx.fill();
+   711→      if (lod > 0.5) {
+   712→        // 看台坐席弧线
+   713→        ctx.strokeStyle = 'rgba(96,80,60,0.5)';
+   714→        ctx.lineWidth = 1;
+   715→        ctx.beginPath();
+   716→        ctx.ellipse(sx, sy - 3, 17, 9, 0, Math.PI * 0.15, Math.PI * 0.85);
+   717→        ctx.stroke();
+   718→        // 条纹大篷 + 旗杆
+   719→        for (let i = 0; i < 5; i++) {
+   720→          ctx.fillStyle = i % 2 ? 'rgb(168,74,58)' : 'rgb(238,228,208)';
+   721→          ctx.fillRect(sx - 14 + i * 5.6, sy - 16, 5.6, 4);
+   722→        }
+   723→        ctx.fillStyle = 'rgb(96,80,60)';
+   724→        ctx.fillRect(sx - 15, sy - 20, 30, 2);
+   725→      }
+   726→      break;
+   727→    }
+   728→    case BuildingKind.Hospital: {
+   729→      // 医院：白楼 + 红十字旗
+   730→      box(ctx, sx, sy, 1.05, 0.9, 18, 'rgb(234,236,232)', 'rgb(198,204,200)', 'rgb(218,222,218)');
+   731→      gableRoof(ctx, sx, sy, 1.15, 1.0, 18, 6, { ...pal, roof: 'rgb(148,164,172)', roofDark: 'rgb(120,136,144)' });
+   732→      if (lod > 0.5) {
+   733→        // 窗（成排）
+   734→        for (let i = 0; i < 3; i++) {
+   735→          ctx.fillStyle = 'rgba(168,200,216,0.9)';
+   736→          ctx.fillRect(sx - 10 + i * 8, sy - 13, 4.5, 4);
+   737→          ctx.fillRect(sx - 10 + i * 8, sy - 5, 4.5, 4);
+   738→        }
+   739→        // 十字旗
+   740→        ctx.strokeStyle = 'rgb(160,160,156)';
+   741→        ctx.lineWidth = 1.5;
+   742→        ctx.beginPath();
+   743→        ctx.moveTo(sx, sy - 24); ctx.lineTo(sx, sy - 40);
+   744→        ctx.stroke();
+   745→        ctx.fillStyle = 'rgb(224,224,220)';
+   746→        ctx.fillRect(sx + 0.5, sy - 40, 13, 9);
+   747→        ctx.fillStyle = 'rgb(200,72,58)';
+   748→        ctx.fillRect(sx + 5, sy - 39, 4, 7);
+   749→        ctx.fillRect(sx + 2.5, sy - 37.5, 9, 3.5);
+   750→      }
+   751→      break;
+   752→    }
+   753→  }
+   754→}
+   755→
+   756→/** 农田：垄沟 + 随周期生长的作物色 */
+   757→function drawField(ctx: CanvasRenderingContext2D, sx: number, sy: number, growth: number, seed: number) {
+   758→  const hw = TILE_W / 2 - 4, hh = TILE_H / 2 - 2;
+   759→  // 土地
+   760→  ctx.fillStyle = 'rgb(146,110,72)';
+   761→  ctx.beginPath();
+   762→  ctx.moveTo(sx, sy - hh); ctx.lineTo(sx + hw, sy); ctx.lineTo(sx, sy + hh); ctx.lineTo(sx - hw, sy);
+   763→  ctx.closePath(); ctx.fill();
+   764→  // 垄
+   765→  ctx.strokeStyle = 'rgb(120,88,56)';
+   766→  ctx.lineWidth = 2;
+   767→  ctx.beginPath();
+   768→  for (let i = -2; i <= 2; i++) {
+   769→    const ox = i * hw / 2.6;
+   770→    ctx.moveTo(sx + ox, sy - hh / 2 + Math.abs(i) * 1.6);
+   771→    ctx.lineTo(sx + ox * 0.2, sy + hh / 2 - Math.abs(i) * 1.2);
+   772→  }
+   773→  ctx.stroke();
+   774→  // 作物
+   775→  if (growth > 0.15) {
+   776→    const g = Math.min(1, growth);
+   777→    const cropColor = g < 0.5 ? `rgb(${120 + g * 60},${150 + g * 50},${70})` : `rgb(${200 + g * 40},${168 - g * 40},${60})`;
+   778→    ctx.fillStyle = cropColor;
+   779→    for (let i = -2; i <= 2; i++) {
+   780→      for (let j = -1; j <= 1; j++) {
+   781→        const ox = i * hw / 3 + j * 4, oy = j * hh / 2.4 + i * 1.4;
+   782→        const hgt = 2 + g * 7;
+   783→        ctx.beginPath();
+   784→        ctx.ellipse(sx + ox, sy + oy - hgt * 0.4, 1.6, hgt * 0.55, 0, 0, Math.PI * 2);
+   785→        ctx.fill();
+   786→      }
+   787→    }
+   788→  }
+   789→}
+   790→
+   791→function cropGrowth(w: WorldState, b: Building): number {
+   792→  // 以建造年 + 当前年的小数相位模拟周期生长（纯视觉）
+   793→  const phase = (w.year % 3) + ((b.id % 7) / 7);
+   794→  return 0.15 + 0.85 * Math.abs(Math.sin(phase * Math.PI / 3));
+   795→}
+   796→
+   797→function eraOf(w: WorldState, b: Building): number {
+   798→  const t = w.civ.tech.levels;
+   799→  const lvl = (d: string) => t[d] ?? 1;
+   800→  switch (b.kind) {
+   801→    case BuildingKind.Camp: return 0;
+   802→    case BuildingKind.Shelter: return 0;
+   803→    case BuildingKind.Townhouse: case BuildingKind.Factory: return 3;
+   804→    case BuildingKind.Bank: case BuildingKind.Theater: return 3;
+   805→    case BuildingKind.Cooperative: case BuildingKind.Services: case BuildingKind.Hospital: return 4;
+   806→    case BuildingKind.Temple: case BuildingKind.Manor: case BuildingKind.Castle: return 2;
+   807→    case BuildingKind.Academy: return lvl('education') >= 4 ? 3 : 2;
+   808→    case BuildingKind.Market: case BuildingKind.Admin: case BuildingKind.Wall: case BuildingKind.Workshop: return 2;
+   809→    default: return lvl('agriculture') >= 2 ? 1 : 0;
+   810→  }
+   811→}
+   812→
+   813→/** 建筑顶部标注高度（用于标签避让，可扩展） */
+   814→export function buildingTopOffset(kind: BuildingKind): number {
+   815→  switch (kind) {
+   816→    case BuildingKind.Factory: return 52;
+   817→    case BuildingKind.Admin: return 50;
+   818→    case BuildingKind.Castle: return 54;
+   819→    case BuildingKind.Temple: return 40;
+   820→    case BuildingKind.Townhouse: return 42;
+   821→    case BuildingKind.Services: return 40;
+   822→    case BuildingKind.Wall: return 18;
+   823→    default: return 28;
+   824→  }
+   825→}
+   826→

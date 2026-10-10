@@ -37,6 +37,8 @@ interface Serialized {
   activeEvents: WorldState['activeEvents'];
   history: WorldState['history'];
   snapshots: WorldState['snapshots'];
+  /** v3.0：持久沙盘印记 */
+  decals: WorldState['decals'];
 }
 
 export function serialize(w: WorldState, worldName: string): string {
@@ -72,6 +74,7 @@ export function serialize(w: WorldState, worldName: string): string {
       chronicle: w.chronicle.slice(-500),
       activeEvents: w.activeEvents,
       history: w.history,
+      decals: w.decals.slice(-CFG.agents.decalsMax),
       // 控制存档体积：仅保留带数据的最近 8 个快照
       snapshots: (() => {
         const withData = w.snapshots.filter(s => s.data).slice(-8);
@@ -118,6 +121,7 @@ export function deserialize(json: string): { world: WorldState; worldName: strin
     chronicle: s.chronicle,
     activeEvents: s.activeEvents,
     history: s.history,
+    decals: s.decals ?? [],
     interventions: s.interventions,
     divine: s.divine,
     divineMax: s.divineMax,

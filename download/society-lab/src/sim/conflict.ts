@@ -158,6 +158,7 @@ export function evaluateConflict(w: WorldState): ConflictResult | null {
       effects,
       intervened: false,
       severity: tension,
+      settlementId: pickLargest(w)?.id,
     },
   };
 }

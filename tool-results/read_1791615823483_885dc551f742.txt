@@ -1,0 +1,757 @@
+     1→/**
+     2→ * Society Lab《人类社会实验室》— 主入口
+     3→ * 菜单 ↔ 游戏状态机、输入（平移/缩放/神力笔刷）、时间循环、
+     4→ * OhMyGame 玩法测试桥（__OHMYGAME_PLAYTEST__）。
+     5→ */
+     6→import './style.css';
+     7→import { CFG } from './config';
+     8→import { Rng, type WorldState, type GodPowerId, type Settlement } from './types';
+     9→import { newWorld, tickYear } from './sim/manager';
+    10→import { macroEconomy } from './sim/economy';
+    11→import { castBrushPower, castCivPower, castPurify, powerChronicleEntry, GOD_POWERS, canAfford } from './powers';
+    12→import { classifySociety, formLabel } from './sim/society';
+    13→import { VisualWorld } from './render/world';
+    14→import { gridToScreen } from './render/iso';
+    15→import { AudioManager } from './audio';
+    16→import { icon } from './ui/icons';
+    17→import {
+    18→  buildHud, setHudSpeed, setHudPower, setHudBrush, updateTopbar, setMuteIcon, toast, setToolbarCollapsed,
+    19→  type HudCallbacks,
+    20→} from './ui/hud';
+    21→import {
+    22→  openChronicle, openObserver, openSaveMenu, openHelp, openFormCard, openEventCard, closeModal,
+    23→  showSettlementPanel, hideSettlementPanel, collapseSettlementPanel, updateEventFeed, isModalOpen,
+    24→} from './ui/panels';
+    25→import { WORLD_TITLES } from './names';
+    26→import { autosave, loadAutosave, serialize as serializeSave, deserialize as deserializeSave } from './saves';
+    27→
+    28→class Game {
+    29→  app = document.getElementById('app')!;
+    30→  world: WorldState | null = null;
+    31→  worldName = '新世界';
+    32→  vw: VisualWorld | null = null;
+    33→  audio = new AudioManager();
+    34→  speed = 1;
+    35→  yearAccum = 0;
+    36→  activePower: GodPowerId | null = null;
+    37→  brush = 1;
+    38→  lastFeedYear = 0;
+    39→  lastForm: string = 'primitive';
+    40→  private raf = 0;
+    41→  private lastTime = 0;
+    42→  private els: Record<string, HTMLElement> = {};
+    43→  private menuCanvas: HTMLCanvasElement | null = null;
+    44→  private menuWorld: WorldState | null = null;
+    45→  private menuVw: VisualWorld | null = null;
+    46→
+    47→  constructor() {
+    48→    this.buildShell();
+    49→    this.showMenu();
+    50→    requestAnimationFrame(t => this.frame(t));
+    51→  }
+    52→
+    53→  private buildShell() {
+    54→    this.app.innerHTML = `
+    55→      <div id="menu">
+    56→        <canvas id="menu-canvas"></canvas>
+    57→        <div class="menu-inner">
+    58→          <div class="game-title">
+    59→            <span class="sub">SOCIETY LAB</span>
+    60→            <h1>人类社会<em>实验室</em></h1>
+    61→            <span class="tagline">创造一个世界，看文明生长、分化与变革——<br>在关键的时刻，以神力改写历史的走向。</span>
+    62→          </div>
+    63→          <div class="menu-card" id="menu-new">
+    64→            <h3><span class="ic">${icon('seed', 16)}</span> 创造新世界</h3>
+    65→            <div class="form-row">
+    66→              <div class="form-item">
+    67→                <label>世界种子（相同种子 → 相同世界）</label>
+    68→                <div style="display:flex;gap:6px">
+    69→                  <input type="number" id="new-seed" value="${Math.floor(Math.random() * 100000)}">
+    70→                  <button class="btn small" id="seed-dice" title="随机">${icon('sparkle', 14)}</button>
+    71→                </div>
+    72→              </div>
+    73→              <div class="form-item">
+    74→                <label>地图规模（v2.0 全面扩大）</label>
+    75→                <select id="new-size">
+    76→                  <option value="64">中等 64×64</option>
+    77→                  <option value="96" selected>标准 96×96</option>
+    78→                  <option value="128">辽阔 128×128</option>
+    79→                </select>
+    80→              </div>
+    81→              <div class="form-item">
+    82→                <label>初始聚落数</label>
+    83→                <select id="new-settlements">
+    84→                  <option value="1" selected>1 处（推荐）</option>
+    85→                  <option value="2">2 处</option>
+    86→                  <option value="3">3 处</option>
+    87→                </select>
+    88→              </div>
+    89→            </div>
+    90→            <div class="form-row">
+    91→              <div class="form-item">
+    92→                <label>初始情景</label>
+    93→                <div class="scenario-pick">
+    94→                  <button data-sc="dawn" class="active">洪荒初民<br><span style="font-size:11px;color:var(--ink-soft)">采集部落，白手起家</span></button>
+    95→                  <button data-sc="valley">河谷黎明<br><span style="font-size:11px;color:var(--ink-soft)">已掌握基础农耕</span></button>
+    96→                </div>
+    97→              </div>
+    98→              <div class="form-item">
+    99→                <label>神力模式</label>
+   100→                <div class="mode-pick">
+   101→                  <button data-mode="free" class="active">
+   102→                    <span>自由上帝</span><span class="desc">神力无限，专注创造与观察</span>
+   103→                  </button>
+   104→                  <button data-mode="limited">
+   105→                    <span>有限干预</span><span class="desc">神力能量有限，需权衡时机</span>
+   106→                  </button>
+   107→                </div>
+   108→              </div>
+   109→            </div>
+   110→            <div class="menu-actions">
+   111→              <button class="btn primary" id="btn-create">${icon('seed', 16)} 创世</button>
+   112→            </div>
+   113→          </div>
+   114→          <div class="menu-actions">
+   115→            <button class="btn ghost" id="btn-continue" style="display:none">${icon('load', 16)} 继续上次的世界</button>
+   116→            <button class="btn ghost" id="btn-menu-help">${icon('help', 16)} 玩法说明</button>
+   117→          </div>
+   118→          <div class="menu-foot">
+   119→            Society Lab · OhMyGame web-game 工程 · TypeScript + Canvas 2D<br>
+   120→            社会演化沙盒 · 所有数据由模拟内核实时生成
+   121→          </div>
+   122→        </div>
+   123→      </div>
+   124→      <div id="game" class="hidden">
+   125→        <div id="main-area">
+   126→          <div id="game-viewport">
+   127→            <canvas id="world-canvas"></canvas>
+   128→          </div>
+   129→        </div>
+   130→      </div>
+   131→      <div id="modal-root"></div>
+   132→      <div id="toasts"></div>`;
+   133→    this.bindViewportResize();
+   134→  }
+   135→
+   136→  /** 方形取景框：取主区宽高的较小者，居中（能看到整张沙盘） */
+   137→  private bindViewportResize() {
+   138→    const fit = () => {
+   139→      const area = document.getElementById('main-area');
+   140→      const vp = document.getElementById('game-viewport');
+   141→      if (!area || !vp) return;
+   142→      const w = area.clientWidth, h = area.clientHeight;
+   143→      const side = Math.max(300, Math.min(w, h));
+   144→      vp.style.width = `${side}px`;
+   145→      vp.style.height = `${side}px`;
+   146→      this.vw?.resize();
+   147→    };
+   148→    window.addEventListener('resize', fit);
+   149→    // 游戏界面显示后也要重算一次（main-area 尺寸在隐藏时为 0）
+   150→    (window as any).__fitViewport = fit;
+   151→  }
+   152→
+   153→  // ---------- 菜单 ----------
+   154→
+   155→  showMenu() {
+   156→    this.speed = 0;
+   157→    (document.getElementById('game') as HTMLElement).classList.add('hidden');
+   158→    (document.getElementById('menu') as HTMLElement).style.display = '';
+   159→    const cont = document.getElementById('btn-continue') as HTMLElement;
+   160→    const auto = loadAutosave();
+   161→    cont.style.display = auto && 'world' in auto ? '' : 'none';
+   162→    this.bindMenu();
+   163→    this.startMenuBackdrop();
+   164→  }
+   165→
+   166→  private menuBound = false;
+   167→  private bindMenu() {
+   168→    if (this.menuBound) return;
+   169→    this.menuBound = true;
+   170→    const menu = document.getElementById('menu')!;
+   171→    menu.querySelectorAll('.mode-pick button').forEach(b => b.addEventListener('click', () => {
+   172→      menu.querySelectorAll('.mode-pick button').forEach(x => x.classList.remove('active'));
+   173→      b.classList.add('active');
+   174→    }));
+   175→    menu.querySelectorAll('.scenario-pick button').forEach(b => b.addEventListener('click', () => {
+   176→      menu.querySelectorAll('.scenario-pick button').forEach(x => x.classList.remove('active'));
+   177→      b.classList.add('active');
+   178→    }));
+   179→    menu.querySelector('#seed-dice')!.addEventListener('click', () => {
+   180→      (menu.querySelector('#new-seed') as HTMLInputElement).value = String(Math.floor(Math.random() * 100000));
+   181→    });
+   182→    menu.querySelector('#btn-create')!.addEventListener('click', () => this.createFromMenu());
+   183→    menu.querySelector('#btn-continue')!.addEventListener('click', () => {
+   184→      const auto = loadAutosave();
+   185→      if (auto && 'world' in auto) this.startWorld(auto.world, auto.worldName);
+   186→    });
+   187→    menu.querySelector('#btn-menu-help')!.addEventListener('click', () => openHelp());
+   188→    document.addEventListener('keydown', e => {
+   189→      if (e.key === 'Enter' && !this.world && (document.getElementById('menu') as HTMLElement).style.display !== 'none') {
+   190→        this.createFromMenu();
+   191→      }
+   192→    });
+   193→  }
+   194→
+   195→  private createFromMenu() {
+   196→    this.audio.ensure();
+   197→    const menu = document.getElementById('menu')!;
+   198→    const seed = Math.abs(Math.floor(Number((menu.querySelector('#new-seed') as HTMLInputElement).value) || 1)) || 1;
+   199→    const size = Number((menu.querySelector('#new-size') as HTMLSelectElement).value);
+   200→    const settlements = Number((menu.querySelector('#new-settlements') as HTMLSelectElement).value);
+   201→    const mode = (menu.querySelector('.mode-pick button.active') as HTMLElement).dataset.mode as 'free' | 'limited';
+   202→    const scenario = (menu.querySelector('.scenario-pick button.active') as HTMLElement).dataset.sc as 'dawn' | 'valley';
+   203→    const w = newWorld({ seed, size, mode, settlements, scenario });
+   204→    const rng = new Rng(seed ^ 0x77);
+   205→    this.startWorld(w, `${WORLD_TITLES[rng.int(WORLD_TITLES.length)]} · ${seed}`);
+   206→  }
+   207→
+   208→  private startMenuBackdrop() {
+   209→    if (this.menuWorld) return;
+   210→    const canvas = document.getElementById('menu-canvas') as HTMLCanvasElement;
+   211→    this.menuCanvas = canvas;
+   212→    this.menuWorld = newWorld({ seed: 4242, size: 64, mode: 'free', settlements: 2, scenario: 'valley' });
+   213→    // 预跑几十年让世界有内容
+   214→    for (let i = 0; i < 60; i++) tickYear(this.menuWorld);
+   215→    this.menuVw = new VisualWorld(canvas);
+   216→    this.menuVw.camera.zoom = 0.5;
+   217→    this.menuVw.camera.targetZoom = 0.56;
+   218→    this.menuVw.centerOnMap(64);
+   219→  }
+   220→
+   221→  // ---------- 游戏世界 ----------
+   222→
+   223→  startWorld(w: WorldState, name: string) {
+   224→    this.world = w;
+   225→    this.worldName = name;
+   226→    this.speed = 1;
+   227→    this.activePower = null;
+   228→    this.lastFeedYear = -1;
+   229→    this.lastForm = w.civ.form;
+   230→    (document.getElementById('menu') as HTMLElement).style.display = 'none';
+   231→    const gameEl = document.getElementById('game') as HTMLElement;
+   232→    gameEl.classList.remove('hidden');
+   233→
+   234→    // 构建游戏 HUD（首次或重建）
+   235→    const existingHud = document.getElementById('topbar');
+   236→    if (existingHud) existingHud.remove();
+   237→    const existingTb = document.getElementById('toolbar');
+   238→    if (existingTb) existingTb.remove();
+   239→    const existingFeed = document.getElementById('eventfeed');
+   240→    if (existingFeed) existingFeed.remove();
+   241→    const existingHint = document.getElementById('hint');
+   242→    if (existingHint) existingHint.remove();
+   243→    const existingSide = document.getElementById('sidepanel');
+   244→    if (existingSide) existingSide.remove();
+   245→
+   246→    const mainArea = document.getElementById('main-area') as HTMLElement;
+   247→    const hud = buildHud(mainArea, this.hudCallbacks(), gameEl);
+   248→    this.els.topbar = hud.topbar;
+   249→    this.els.toolbar = hud.toolbar;
+   250→    this.els.feed = hud.feed;
+   251→    this.els.hint = hud.hint;
+   252→
+   253→    const side = document.createElement('aside');
+   254→    side.id = 'sidepanel';
+   255→    side.classList.add('hidden');
+   256→    mainArea.appendChild(side);
+   257→    this.els.sidepanel = side;
+   258→
+   259→    const canvas = document.getElementById('world-canvas') as HTMLCanvasElement;
+   260→    this.vw = new VisualWorld(canvas);
+   261→    this.vw.minimap = document.createElement('canvas');
+   262→    this.vw.minimap.width = this.vw.minimap.height = w.config.size;
+   263→    this.vw.terrainCache.dirty = true;
+   264→    (window as any).__fitViewport?.();
+   265→    this.vw.fitMap(w.config.size);
+   266→    this.bindCanvasInput(canvas);
+   267→    this.bindKeys();
+   268→    this.audio.ensure();
+   269→    setHudSpeed(hud.topbar, 1);
+   270→    setHudPower(hud.toolbar, null);
+   271→    // 恢复工具栏收缩状态
+   272→    const tbCollapsed = localStorage.getItem('society-lab-tb-collapsed') === '1';
+   273→    if (tbCollapsed) setToolbarCollapsed(hud.toolbar, true);
+   274→    updateTopbar(gameEl, w, name);
+   275→    this.showHint('全景开局 · 滚轮放大细看 · H 回到全景 · 左侧选择神力', 5200);
+   276→    toast(`世界「${name}」已苏醒`, 'good', 'seed');
+   277→  }
+   278→
+   279→  loadWorld(w: WorldState, name: string) {
+   280→    // 保留当前 UI，重建渲染状态
+   281→    this.world = w;
+   282→    this.worldName = name;
+   283→    this.speed = 0;
+   284→    this.lastFeedYear = w.year;
+   285→    this.vw = null;
+   286→    this.startWorld(w, name);
+   287→    this.speed = 0;
+   288→    setHudSpeed(this.els.topbar, 0);
+   289→    (this.els.sidepanel as HTMLElement).classList.add('hidden');
+   290→  }
+   291→
+   292→  private hudCallbacks(): HudCallbacks {
+   293→    return {
+   294→      onSpeed: s => {
+   295→        this.speed = s;
+   296→        this.audio.ensure();
+   297→        setHudSpeed(this.els.topbar, s);
+   298→        if (this.world) this.showHint(s === 0 ? '时间暂停' : s === 1 ? '正常速度' : s === 2 ? '快速推进' : '极速推进', 1600);
+   299→      },
+   300→      onStep: () => {
+   301→        if (this.world && this.speed === 0) {
+   302→          const report = tickYear(this.world);
+   303→          this.afterYear(report);
+   304→        }
+   305→      },
+   306→      onPower: id => {
+   307→        if (!this.world) return;
+   308→        if (id === 'enlighten' || id === 'ideas' || id === 'heal') {
+   309→          const res = castCivPower(this.world, id);
+   310→          if (res.ok) {
+   311→            const entry = powerChronicleEntry(this.world, id, res);
+   312→            this.world.chronicle.push(entry);
+   313→            this.audio.power();
+   314→            this.flash('#7fc7ad', 0.35);
+   315→            const s = this.world.settlements.find(x => !x.dead);
+   316→            if (s && id === 'heal') this.vw?.fx.spawn('heal', s.x, s.y, 6);
+   317→            toast(res.message, 'good', id === 'enlighten' ? 'enlighten' : id === 'heal' ? 'heal' : 'ideas');
+   318→            this.refreshHud();
+   319→          } else toast(res.message, 'bad', 'alert');
+   320→          return;
+   321→        }
+   322→        this.activePower = this.activePower === id ? null : id;
+   323→        setHudPower(this.els.toolbar, this.activePower);
+   324→        const def = GOD_POWERS.find(p => p.id === id);
+   325→        this.showHint(this.activePower
+   326→          ? `神力就绪：${def?.name ?? ''} · 点击地图施放（右键/Esc 取消）${def?.brush ? ' · 可调笔刷' : ''}`
+   327→          : '检视模式：点击聚落查看详情', 2600);
+   328→      },
+   329→      onBrush: r => {
+   330→        this.brush = r;
+   331→        setHudBrush(this.els.toolbar, r);
+   332→        if (this.vw) this.vw.brushRadius = r;
+   333→      },
+   334→      onChronicle: () => this.world && openChronicle(this.world, this.panelActions()),
+   335→      onObserver: () => this.world && openObserver(this.world),
+   336→      onSave: () => this.world && openSaveMenu(this.world, this.worldName, this.panelActions()),
+   337→      onMenu: () => {
+   338→        if (this.world) { autosave(this.world, this.worldName); toast('已自动保存，返回主菜单', 'good', 'save'); }
+   339→        this.showMenu();
+   340→      },
+   341→      onHelp: () => openHelp(),
+   342→      onFormBadge: () => this.world && openFormCard(this.world),
+   343→      onPopStat: () => this.world && openObserver(this.world),
+   344→      onFoodStat: () => this.world && openObserver(this.world),
+   345→      onMute: () => {
+   346→        this.audio.setMuted(!this.audio.muted);
+   347→        setMuteIcon(this.els.topbar, this.audio.muted);
+   348→      },
+   349→      onHome: () => this.vw && this.world && this.vw.fitMap(this.world.config.size),
+   350→      onCollapseToolbar: (collapsed) => {
+   351→        localStorage.setItem('society-lab-tb-collapsed', collapsed ? '1' : '0');
+   352→      },
+   353→    };
+   354→  }
+   355→
+   356→  panelActions() {
+   357→    return {
+   358→      focusSettlement: (s: Settlement) => this.vw?.focusSettlement(s),
+   359→      castBlessingAt: (s: Settlement) => this.blessingAt(s),
+   360→      purify: (settlementId: number) => this.purifyAt(settlementId),
+   361→      refreshHud: () => this.refreshHud(),
+   362→      loadWorld: (w: WorldState, n: string) => this.loadWorld(w, n),
+   363→      toast: (t: string, k?: 'good' | 'bad' | 'neutral', i?: string) => toast(t, k, i),
+   364→      playSfx: (name: string, sev?: number) => this.playSfx(name, sev),
+   365→    };
+   366→  }
+   367→
+   368→  private blessingAt(s: Settlement) {
+   369→    if (!this.world) return;
+   370→    const res = castBrushPower(this.world, 'blessing', s.x, s.y, 0);
+   371→    if (res.ok) {
+   372→      const entry = powerChronicleEntry(this.world, 'blessing', res);
+   373→      this.world.chronicle.push(entry);
+   374→      this.vw?.addPing(s.x, s.y, 'rgba(232,196,98,0.95)');
+   375→      this.audio.power();
+   376→      this.flash('#e8c462', 0.3);
+   377→      toast(`丰产祝福降临 ${s.name}`, 'good', 'blessing');
+   378→      this.refreshHud();
+   379→    } else toast(res.message, 'bad', 'alert');
+   380→  }
+   381→
+   382→  private purifyAt(settlementId: number) {
+   383→    if (!this.world) return false;
+   384→    const res = castPurify(this.world, settlementId);
+   385→    if (res.ok) {
+   386→      this.world.chronicle.push({
+   387→        id: `ev-${this.world.nextEventId++}`, year: this.world.year, title: '神力：净化疫病',
+   388→        category: 'plague', text: '神光扫过病榻，高热退去，咳嗽止息。医者们把这一夜记录了下来。',
+   389→        causes: ['神（玩家）净化疫病'], effects: ['疫病终止', '医学知识积累'], intervened: true,
+   390→        severity: 0.4, settlementId,
+   391→      });
+   392→      const s = this.world.settlements.find(x => x.id === settlementId);
+   393→      if (s) this.vw?.addPing(s.x, s.y, 'rgba(127,199,173,0.95)');
+   394→      this.audio.power();
+   395→      this.flash('#7fc7ad', 0.35);
+   396→      toast('疫病已被净化', 'good', 'sparkle');
+   397→      this.refreshHud();
+   398→      return true;
+   399→    }
+   400→    toast(res.message, 'bad', 'alert');
+   401→    return false;
+   402→  }
+   403→
+   404→  playSfx(name: string, severity = 0.3) {
+   405→    if (name === 'chime') this.audio.chime(severity);
+   406→    else if (name === 'power') this.audio.power();
+   407→    else if (name === 'click') this.audio.click();
+   408→    else if (name === 'era') this.audio.eraFanfare();
+   409→    else if (name === 'milestone') this.audio.milestone();
+   410→  }
+   411→
+   412→  flash(color: string, alpha: number) {
+   413→    if (this.vw) {
+   414→      this.vw.flashOverlay = { color: color.replace(')', ',$a)').replace('rgb', 'rgba'), alpha };
+   415→    }
+   416→  }
+   417→
+   418→  refreshHud() {
+   419→    if (this.world) updateTopbar(document.getElementById('game') as HTMLElement, this.world, this.worldName);
+   420→  }
+   421→
+   422→  showHint(text: string, ms = 2200) {
+   423→    const hint = this.els.hint;
+   424→    if (!hint) return;
+   425→    hint.textContent = text;
+   426→    hint.style.opacity = '1';
+   427→    clearTimeout((hint as any)._t);
+   428→    (hint as any)._t = setTimeout(() => { hint.style.opacity = '0'; }, ms);
+   429→  }
+   430→
+   431→  // ---------- 输入 ----------
+   432→
+   433→  private inputBound = false;
+   434→  private bindCanvasInput(canvas: HTMLCanvasElement) {
+   435→    if (this.inputBound) return;
+   436→    this.inputBound = true;
+   437→    let dragging = false;
+   438→    let moved = 0;
+   439→    let lastX = 0, lastY = 0;
+   440→
+   441→    canvas.addEventListener('mousedown', e => {
+   442→      if (isModalOpen()) return;
+   443→      dragging = true;
+   444→      moved = 0;
+   445→      lastX = e.clientX; lastY = e.clientY;
+   446→    });
+   447→    window.addEventListener('mousemove', e => {
+   448→      if (!this.vw || !this.world) return;
+   449→      // hover tile
+   450→      const tile = this.vw.screenToTile(e.clientX, e.clientY);
+   451→      this.vw.hoverTile = this.activePower && tile &&
+   452→        tile.x >= 0 && tile.y >= 0 && tile.x < this.world.config.size && tile.y < this.world.config.size ? tile : null;
+   453→      if (!dragging) return;
+   454→      const dx = e.clientX - lastX, dy = e.clientY - lastY;
+   455→      moved += Math.abs(dx) + Math.abs(dy);
+   456→      if (moved > 6) {
+   457→        this.vw.camera.x -= dx / this.vw.camera.zoom;
+   458→        this.vw.camera.y -= dy / this.vw.camera.zoom;
+   459→        this.vw.camera.targetX = this.vw.camera.x;
+   460→        this.vw.camera.targetY = this.vw.camera.y;
+   461→        canvas.classList.add('dragging');
+   462→      }
+   463→      lastX = e.clientX; lastY = e.clientY;
+   464→    });
+   465→    window.addEventListener('mouseup', e => {
+   466→      if (!dragging) return;
+   467→      dragging = false;
+   468→      canvas.classList.remove('dragging');
+   469→      if (moved <= 6 && e.target === canvas) this.handleClick(e.clientX, e.clientY, e.button);
+   470→    });
+   471→    canvas.addEventListener('wheel', e => {
+   472→      if (!this.vw || !this.world) return;
+   473→      e.preventDefault();
+   474→      const factor = e.deltaY > 0 ? 0.88 : 1.14;
+   475→      // 缩放下限随地图自适应：允许缩到全景之外一点
+   476→      const rect = this.vw.canvas.getBoundingClientRect();
+   477→      const fitZoom = Math.min(
+   478→        rect.width / (this.world.config.size * 64),
+   479→        rect.height / (this.world.config.size * 32 + 72),
+   480→      ) * 0.96;
+   481→      this.vw.camera.targetZoom = Math.max(fitZoom * 0.75, Math.min(2.8, this.vw.camera.targetZoom * factor));
+   482→    }, { passive: false });
+   483→    canvas.addEventListener('contextmenu', e => {
+   484→      e.preventDefault();
+   485→      if (this.activePower) {
+   486→        this.activePower = null;
+   487→        setHudPower(this.els.toolbar, null);
+   488→        this.showHint('神力已取消', 1400);
+   489→      }
+   490→    });
+   491→  }
+   492→
+   493→  private handleClick(px: number, py: number, button: number) {
+   494→    if (!this.world || !this.vw || button !== 0) return;
+   495→    const tile = this.vw.screenToTile(px, py);
+   496→    if (!tile) return;
+   497→    const size = this.world.config.size;
+   498→    if (tile.x < 0 || tile.y < 0 || tile.x >= size || tile.y >= size) {
+   499→      // 神力就绪时点到沙盘外给出提示，避免“点了没反应”的困惑（v1.0.1）
+   500→      if (this.activePower) this.showHint('点击在沙盘之外 · 请点在地图上施放', 1800);
+   501→      return;
+   502→    }
+   503→
+   504→    if (this.activePower) {
+   505→      const res = castBrushPower(this.world, this.activePower, tile.x, tile.y, this.brush);
+   506→      if (res.ok) {
+   507→        // 陨星在 castMeteor 内部已记录编年史，不重复记录
+   508→        if (this.activePower !== 'meteor') {
+   509→          const entry = powerChronicleEntry(this.world, this.activePower, res);
+   510→          this.world.chronicle.push(entry);
+   511→        }
+   512→        // 地形变化 → 重建缓存与小地图
+   513→        const terrainPowers: GodPowerId[] = ['forest', 'fertile', 'meadow', 'water', 'ore', 'uplift', 'meteor', 'wildfire'];
+   514→        if (terrainPowers.includes(this.activePower)) {
+   515→          this.vw.terrainCache.dirty = true;
+   516→          this.vw.minimapDirty = true;
+   517→        }
+   518→        // 特效
+   519→        this.vw.fx.spawnForPower(this.activePower, tile.x, tile.y, this.world);
+   520→        this.vw.addPing(tile.x, tile.y, this.activePower === 'drought' || this.activePower === 'meteor' ? 'rgba(220,120,80,0.95)' : 'rgba(127,199,173,0.9)');
+   521→        this.audio.power();
+   522→        if (this.activePower === 'meteor') this.flash('#ffb060', 0.4);
+   523→        else this.flash(this.activePower === 'drought' ? 'rgb(216,160,80)' : 'rgb(127,199,173)', 0.28);
+   524→        toast(res.message, 'good', this.activePower);
+   525→        this.refreshHud();
+   526→      } else {
+   527→        toast(res.message, 'bad', 'alert');
+   528→      }
+   529→      return;
+   530→    }
+   531→    // 检视模式：找最近聚落
+   532→    let best: Settlement | null = null, bestD = 2.4;
+   533→    for (const s of this.world.settlements) {
+   534→      const d = Math.hypot(s.x - tile.x, s.y - tile.y);
+   535→      if (d < bestD) { bestD = d; best = s; }
+   536→    }
+   537→    if (best) {
+   538→      showSettlementPanel(this.els.sidepanel, this.world, best, this.panelActions());
+   539→      this.audio.click();
+   540→    } else {
+   541→      hideSettlementPanel(this.els.sidepanel);
+   542→    }
+   543→  }
+   544→
+   545→  private keysBound = false;
+   546→  private bindKeys() {
+   547→    if (this.keysBound) return;
+   548→    this.keysBound = true;
+   549→    document.addEventListener('keydown', e => {
+   550→      if (isModalOpen()) {
+   551→        if (e.key === 'Escape') {
+   552→          // 必须走 closeModal：直接清 innerHTML 会让 modalOpen 标志永久卡在 true，
+   553→          // 导致画布输入、快捷键与模拟推进全部失效（v1.0.1 修复）
+   554→          closeModal();
+   555→        }
+   556→        return;
+   557→      }
+   558→      if (!this.world) return;
+   559→      switch (e.key) {
+   560→        case ' ':
+   561→          e.preventDefault();
+   562→          this.speed = this.speed === 0 ? 1 : 0;
+   563→          setHudSpeed(this.els.topbar, this.speed);
+   564→          break;
+   565→        case '1': this.speed = 1; setHudSpeed(this.els.topbar, 1); break;
+   566→        case '2': this.speed = 2; setHudSpeed(this.els.topbar, 2); break;
+   567→        case '3': this.speed = 4; setHudSpeed(this.els.topbar, 4); break;
+   568→        case '4': this.speed = 8; setHudSpeed(this.els.topbar, 8); break;
+   569→        case 'Tab':
+   570→          e.preventDefault();
+   571→          {
+   572→            const tb = this.els.toolbar;
+   573→            const collapsed = !tb.classList.contains('collapsed');
+   574→            setToolbarCollapsed(tb, collapsed);
+   575→            localStorage.setItem('society-lab-tb-collapsed', collapsed ? '1' : '0');
+   576→          }
+   577→          break;
+   578→        case 'Escape':
+   579→          if (this.activePower) {
+   580→            this.activePower = null;
+   581→            setHudPower(this.els.toolbar, null);
+   582→          } else {
+   583→            if (!(this.els.sidepanel as HTMLElement).classList.contains('hidden')) collapseSettlementPanel(this.els.sidepanel);
+   584→          }
+   585→          break;
+   586→        case 'h': case 'H':
+   587→          this.vw?.fitMap(this.world.config.size);
+   588→          break;
+   589→        case 'c': case 'C': openChronicle(this.world, this.panelActions()); break;
+   590→        case 'o': case 'O': openObserver(this.world); break;
+   591→        case 's': case 'S': openSaveMenu(this.world, this.worldName, this.panelActions()); break;
+   592→        case 'f': case 'F': {
+   593→          // 聚焦最大聚落
+   594→          const alive = this.world.settlements.filter(s => !s.dead);
+   595→          if (alive.length) this.vw?.focusSettlement(alive.reduce((a, b) => a.population > b.population ? a : b));
+   596→          break;
+   597→        }
+   598→      }
+   599→    });
+   600→    window.addEventListener('resize', () => {
+   601→      this.vw?.resize();
+   602→      if (this.menuVw) this.menuVw.resize();
+   603→    });
+   604→  }
+   605→
+   606→  // ---------- 主循环 ----------
+   607→
+   608→  frame(time: number) {
+   609→    const dt = Math.min(0.06, (time - this.lastTime) / 1000 || 0.016);
+   610→    this.lastTime = time;
+   611→
+   612→    // 菜单背景
+   613→    if ((document.getElementById('menu') as HTMLElement).style.display !== 'none' && this.menuVw && this.menuWorld) {
+   614→      const cam = this.menuVw.camera;
+   615→      cam.targetX = Math.sin(time * 0.00008) * 380;
+   616→      cam.targetY = this.menuWorld.config.size * 16 + Math.cos(time * 0.00006) * 160;
+   617→      this.menuVw.render(this.menuWorld, dt, time, true);
+   618→    }
+   619→
+   620→    // 游戏世界
+   621→    if (this.world && this.vw && (document.getElementById('game') as HTMLElement).classList.contains('hidden') === false) {
+   622→      if (this.speed > 0 && !isModalOpen()) {
+   623→        this.yearAccum += dt * this.speed;
+   624→        const yearSeconds = CFG.yearMs1x / 1000;
+   625→        while (this.yearAccum >= yearSeconds) {
+   626→          this.yearAccum -= yearSeconds;
+   627→          const report = tickYear(this.world);
+   628→          this.afterYear(report);
+   629→          if (this.speed === 0) break;
+   630→        }
+   631→      }
+   632→      this.vw.render(this.world, dt, time, this.speed === 0);
+   633→    }
+   634→    this.raf = requestAnimationFrame(t => this.frame(t));
+   635→  }
+   636→
+   637→  afterYear(report: ReturnType<typeof tickYear>) {
+   638→    if (!this.world) return;
+   639→    const w = this.world;
+   640→    this.refreshHud();
+   641→
+   642→    // 事件提示 + 视觉特效
+   643→    for (const ev of report.events) {
+   644→      if (ev.category === 'institution') {
+   645→        this.playSfx('era');
+   646→        toast(ev.title, 'good', 'branch');
+   647→        const s = ev.settlementId !== undefined ? w.settlements.find(x => x.id === ev.settlementId) : null;
+   648→        if (s) this.vw?.addPing(s.x, s.y, 'rgba(201,162,39,0.95)');
+   649→      } else if (ev.severity > 0.55) {
+   650→        this.playSfx('chime', ev.severity);
+   651→        toast(ev.title, 'bad', 'alert');
+   652→        const s = ev.settlementId !== undefined ? w.settlements.find(x => x.id === ev.settlementId) : null;
+   653→        if (s) this.vw?.addPing(s.x, s.y, 'rgba(180,85,45,0.9)');
+   654→      } else if (ev.category === 'invention' || ev.category === 'achievement') {
+   655→        this.playSfx('milestone');
+   656→      }
+   657→      // 事件 → 沙盘上的真实视觉表现（v2.0）
+   658→      this.vw?.fx.spawnForEvent(w, ev);
+   659→    }
+   660→
+   661→    // 事件流
+   662→    updateEventFeed(this.els.feed, w, this.panelActions(), this.lastFeedYear);
+   663→    this.lastFeedYear = w.year;
+   664→
+   665→    // 雨声强度
+   666→    if (this.vw && this.world) {
+   667→      let wetCount = 0;
+   668→      const step = 3;
+   669→      for (let i = 0; i < this.world.weather.length; i += step * step) {
+   670→        if (this.world.weather[i].wet > 0.5) wetCount++;
+   671→      }
+   672→      this.audio.setRainIntensity(Math.min(1, wetCount / 40));
+   673→    }
+   674→
+   675→    // 自动存档（每 10 年）
+   676→    if (w.year % 10 === 0) autosave(w, this.worldName);
+   677→
+   678→    // 文明湮灭提示
+   679→    if (w.civ.vars.population === 0 && w.year > 10) {
+   680→      this.speed = 0;
+   681→      setHudSpeed(this.els.topbar, 0);
+   682→      toast('文明已经湮灭……可读取存档或从分支重启', 'bad', 'alert');
+   683→    }
+   684→  }
+   685→}
+   686→
+   687→// ---------- OhMyGame 玩法测试桥（开发模式） ----------
+   688→if ((import.meta as any).env?.DEV) {
+   689→  (window as any).__OHMYGAME_PLAYTEST__ = {
+   690→    snapshot: () => {
+   691→      const g = (window as any).__game as Game | undefined;
+   692→      if (!g?.world) return null;
+   693→      const w = g.world;
+   694→      const macro = macroEconomy(w);
+   695→      const cls = classifySociety(w);
+   696→      return {
+   697→        year: w.year,
+   698→        form: w.civ.form,
+   699→        formLabel: formLabel(cls),
+   700→        population: macro.population,
+   701→        foodRatio: Math.round(macro.foodRatio * 1000) / 1000,
+   702→        unrest: Math.round(w.civ.vars.unrest * 1000) / 1000,
+   703→        settlements: w.settlements.filter(s => !s.dead).length,
+   704→        buildings: w.settlements.reduce((a, s) => a + s.buildings.length, 0),
+   705→        chronicleLength: w.chronicle.length,
+   706→        interventions: w.interventions,
+   707→        speed: g.speed,
+   708→        overflow: document.documentElement.scrollWidth > window.innerWidth,
+   709→        ready: true,
+   710→      };
+   711→    },
+   712→    reset: () => {
+   713→      const g = (window as any).__game as Game | undefined;
+   714→      if (g) { g.showMenu(); return true; }
+   715→      return false;
+   716→    },
+   717→    setSeed: (seed: number) => {
+   718→      const g = (window as any).__game as Game | undefined;
+   719→      if (!g) return false;
+   720→      const w = newWorld({ seed: seed >>> 0, size: 48, mode: 'free', settlements: 1, scenario: 'dawn' });
+   721→      g.startWorld(w, `测试世界 ${seed}`);
+   722→      return true;
+   723→    },
+   724→    step: (years: number) => {
+   725→      const g = (window as any).__game as Game | undefined;
+   726→      if (!g?.world) return null;
+   727→      const reports = [];
+   728→      for (let i = 0; i < Math.max(0, Math.floor(years)); i++) {
+   729→        reports.push(tickYear(g.world));
+   730→      }
+   731→      g.refreshHud();
+   732→      return { years: reports.length, events: reports.reduce((a, r) => a + r.events.length, 0) };
+   733→    },
+   734→    usePower: (id: string, x: number, y: number, radius = 1) => {
+   735→      const g = (window as any).__game as Game | undefined;
+   736→      if (!g?.world) return null;
+   737→      if (id === 'enlighten' || id === 'ideas') return castCivPower(g.world, id as any);
+   738→      return castBrushPower(g.world, id as GodPowerId, x, y, radius);
+   739→    },
+   740→    loadSave: (json: string) => {
+   741→      const g = (window as any).__game as Game | undefined;
+   742→      if (!g) return null;
+   743→      const d = deserializeSave(json);
+   744→      if ('world' in d) { g.loadWorld(d.world, d.worldName); return true; }
+   745→      return false;
+   746→    },
+   747→    serialize: () => {
+   748→      const g = (window as any).__game as Game | undefined;
+   749→      if (!g?.world) return null;
+   750→      return serializeSave(g.world, g.worldName);
+   751→    },
+   752→  };
+   753→}
+   754→
+   755→const game = new Game();
+   756→(window as any).__game = game;
+   757→
