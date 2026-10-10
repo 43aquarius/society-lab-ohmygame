@@ -19,7 +19,7 @@ import {
   type HudCallbacks,
 } from './ui/hud';
 import {
-  openChronicle, openObserver, openSaveMenu, openHelp, openFormCard, openEventCard,
+  openChronicle, openObserver, openSaveMenu, openHelp, openFormCard, openEventCard, closeModal,
   showSettlementPanel, hideSettlementPanel, updateEventFeed, isModalOpen,
 } from './ui/panels';
 import { WORLD_TITLES } from './names';
@@ -458,7 +458,11 @@ class Game {
     const tile = this.vw.screenToTile(px, py);
     if (!tile) return;
     const size = this.world.config.size;
-    if (tile.x < 0 || tile.y < 0 || tile.x >= size || tile.y >= size) return;
+    if (tile.x < 0 || tile.y < 0 || tile.x >= size || tile.y >= size) {
+      // 神力就绪时点到沙盘外给出提示，避免“点了没反应”的困惑（v1.0.1）
+      if (this.activePower) this.showHint('点击在沙盘之外 · 请点在地图上施放', 1800);
+      return;
+    }
 
     if (this.activePower) {
       const res = castBrushPower(this.world, this.activePower, tile.x, tile.y, this.brush);
@@ -497,8 +501,9 @@ class Game {
     document.addEventListener('keydown', e => {
       if (isModalOpen()) {
         if (e.key === 'Escape') {
-          const root = document.getElementById('modal-root')!;
-          if (root.firstChild) { root.innerHTML = ''; }
+          // 必须走 closeModal：直接清 innerHTML 会让 modalOpen 标志永久卡在 true，
+          // 导致画布输入、快捷键与模拟推进全部失效（v1.0.1 修复）
+          closeModal();
         }
         return;
       }
