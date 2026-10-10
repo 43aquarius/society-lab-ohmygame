@@ -3,11 +3,11 @@
  * 每个事件由真实模拟变量触发，效果回写世界状态（不是随机文字）。
  * 事件记录原因与结果，进入编年史。
  */
-import { Terrain, type WorldState, type EventRecord, type EventCategory } from '../types';
-import { macroEconomy, estimateFoodOutput } from './economy';
+import { Terrain, type WorldState, type EventRecord, type EventCategory, type Settlement } from '../types';
+import { macroEconomy } from './economy';
+import { housingCapacity } from './population';
 import { TECH_NAMES, TechDomain } from '../types';
 import { INVENTIONS } from './technology';
-import { classifySociety } from './society';
 
 interface EventDef {
   id: string;
@@ -63,8 +63,8 @@ export const EVENT_DEFS: EventDef[] = [
     id: 'famine',
     title: () => '饥荒蔓延',
     category: 'famine', cooldown: 4,
-    condition: (w, c) => c.macro.foodRatio < 0.92,
-    weight: (w, c) => (0.92 - c.macro.foodRatio) * 9 + 1,
+    condition: (w, c) => c.macro.foodRatio < 0.95,
+    weight: (w, c) => (0.95 - c.macro.foodRatio) * 8 + 0.8,
     apply: (w, c) => {
       const v = w.civ.vars;
       v.unrest = Math.min(1, v.unrest + 0.18);
@@ -80,7 +80,7 @@ export const EVENT_DEFS: EventDef[] = [
           v.resourcePressure > 0.5 ? '人口对土地的压力长期偏高' : '连年消耗超过了产出',
         ],
         effects: ['死亡率上升（见人口结算）', '冲突风险上升', '可能触发迁徙'],
-        severity: Math.min(1, (0.92 - c.macro.foodRatio) * 4),
+        severity: Math.min(1, (0.95 - c.macro.foodRatio) * 5),
         settlementId: worst?.id,
       };
     },
@@ -124,21 +124,23 @@ export const EVENT_DEFS: EventDef[] = [
     apply: (w) => {
       const targets = w.settlements.filter(s => !s.dead && nearMountain(w, s));
       const s = w.rng.pick(targets);
-      const destroyed = s.buildings.filter(b => b.progress >= 1);
-      const n = Math.min(destroyed.length, w.rng.int(2));
+      // 洪水优先冲毁低处的农田与仓储
+      const destroyed = s.buildings.filter(b => b.progress >= 1)
+        .sort((a, b) => (a.kind === 'farm' ? -1 : a.kind === 'granary' ? -0.5 : 0) - (b.kind === 'farm' ? -1 : b.kind === 'granary' ? -0.5 : 0));
+      const n = Math.min(destroyed.length, 2 + w.rng.int(2));
       const names: string[] = [];
       for (let i = 0; i < n; i++) {
-        const b = w.rng.pick(destroyed);
+        const b = destroyed[i];
         const idx = s.buildings.indexOf(b);
-        if (idx >= 0) { s.buildings.splice(idx, 1); names.push(b.kind); }
+        if (idx >= 0) { s.buildings.splice(idx, 1); names.push(b.kind === 'farm' ? '农田' : b.kind === 'granary' ? '粮仓' : '建筑'); }
       }
       const dead = Math.round(s.population * w.rng.range(0.01, 0.04));
       s.population -= dead;
       s.food *= 0.7;
       return {
-        text: `山间的暴雨汇成浊流，冲毁了${s.name}的${n > 0 ? '部分建筑' : '田垄'}。`,
+        text: `山间的暴雨汇成浊流，漫过河床冲进${s.name}。${n > 0 ? `浑水退去后，${names.join('、')}只余下泥泞的残迹。` : '田垄成了一片泽国。'}`,
         causes: ['聚落邻近山地', '降水异常集中'],
-        effects: [...(n > 0 ? [`${n} 处建筑被毁`] : []), `${dead} 人遇难`, '存粮受损'],
+        effects: [...(n > 0 ? [`${n} 处设施被毁`] : []), `${dead} 人遇难`, '存粮受损'],
         severity: 0.5,
         settlementId: s.id,
       };
@@ -209,8 +211,10 @@ export const EVENT_DEFS: EventDef[] = [
     id: 'war-skirmish',
     title: () => '聚落冲突',
     category: 'war', cooldown: 9,
-    condition: (w, c) => c.macro.settlementCount >= 2 && w.civ.vars.resourcePressure > 0.4 && c.macro.foodRatio < 1.05,
-    weight: (w) => w.civ.vars.resourcePressure * 2.2 + (w.civ.vars.stateCapacity > 0.5 ? -0.8 : 0),
+    // v2.0：除了资源压力，领地毗邻本身就是战争的温床（历史上的部落战争如此）
+    condition: (w, c) => c.macro.settlementCount >= 2
+      && (w.civ.vars.resourcePressure > 0.25 || c.macro.foodRatio < 1.08 || hasCloseNeighbors(w)),
+    weight: (w) => w.civ.vars.resourcePressure * 2.2 + (hasCloseNeighbors(w) ? 0.8 : 0) + (w.civ.vars.stateCapacity > 0.5 ? -0.6 : 0.5),
     apply: (w, c) => {
       const alive = w.settlements.filter(s => !s.dead);
       const a = w.rng.pick(alive), b = w.rng.pick(alive.filter(s => s !== a) ?? alive);
@@ -244,8 +248,16 @@ export const EVENT_DEFS: EventDef[] = [
       v.orgCommon = Math.min(1, v.orgCommon + 0.04);
       const g = w.civ.groups.find(x => x.id === 'commoners')!;
       g.ideas = Math.min(1, g.ideas + 0.2);
+      // 文案随时代变化：无文字的时代在篝火边议论，有城市后在酒馆与印刷所
+      const urban = w.settlements.some(s => !s.dead && (s.stage === 'town' || s.stage === 'city'));
+      const literate = (w.civ.tech.levels.education ?? 1) >= 3;
+      const text = urban && literate
+        ? `「凭什么生而不平等？」这样的问题开始在酒馆与作坊里流传。识字的人把疑问印成了传单，在集市上分发。`
+        : urban
+          ? `「凭什么生而不平等？」这样的问题开始在市井流传，行人驻足倾听。`
+          : `「凭什么分肉的多寡由他人说了算？」这样的抱怨在篝火边与井台边悄悄流传，长者们假装没有听见。`;
       return {
-        text: `「凭什么生而不平等？」这样的问题开始在小酒馆与井台边流传。识字的人把疑问写成了传单。`,
+        text,
         causes: [`文教 ${pct(v.education)}`, w.civ.enlightenment > 0.2 ? '神启的思想火种' : '识字率与流动性的提高'],
         effects: ['政治参与上升', '平民组织能力上升', '改革诉求增强'],
         severity: 0.3,
@@ -261,9 +273,16 @@ export const EVENT_DEFS: EventDef[] = [
     apply: (w, c) => {
       const sid = c.stageUps[0];
       const s = w.settlements.find(x => x.id === sid)!;
-      const stageNames: Record<string, string> = { camp: '营地', hamlet: '小村', village: '村庄', town: '城镇', city: '城市' };
+      const stageNames: Record<string, string> = { camp: '营地', hamlet: '村落', village: '村庄', town: '城镇', city: '城市' };
+      const buildingText: Record<string, string> = {
+        camp: '新的帐篷与篝火圈立了起来',
+        hamlet: '木屋与仓房相继立起，小径连成了巷',
+        village: '新的巷道、仓房与公共空间相继出现',
+        town: '作坊、市集与官署拔地而起，人口如百川汇流',
+        city: '高墙、学宫与市声喧嚣的街市，一座真正的城市诞生了',
+      };
       return {
-        text: `人口与财富的积累让${s.name}的规模跨过了门槛。新的街巷、仓库与公共空间相继出现——它已成为一座${stageNames[s.stage]}。`,
+        text: `${s.name}的规模跨过了门槛，如今它的名字写作「${s.name}」。${buildingText[s.stage]}。`,
         causes: [`人口达到 ${s.population}`],
         effects: [`聚落等级 → ${stageNames[s.stage]}`, '将解锁相应新建筑'],
         severity: 0.35,
@@ -273,11 +292,11 @@ export const EVENT_DEFS: EventDef[] = [
   },
   {
     id: 'population-milestone',
-    title: (w) => `人口里程碑：${w.civ.vars.population >= 1000 ? '千人' : '五百人'}`,
+    title: (w, c) => `人口里程碑：${c.macro.population >= 5000 ? '五千人' : c.macro.population >= 2500 ? '两千五百人' : c.macro.population >= 1000 ? '千人' : c.macro.population >= 500 ? '五百人' : '两百人'}`,
     category: 'achievement', cooldown: 3,
     condition: (w, c) => {
       const p = c.macro.population;
-      return (p >= 500 && p < 560) || (p >= 1000 && p < 1100) || (p >= 2000 && p < 2160);
+      return (p >= 200 && p < 220) || (p >= 500 && p < 550) || (p >= 1000 && p < 1100) || (p >= 2500 && p < 2750) || (p >= 5000 && p < 5500);
     },
     weight: () => 4,
     apply: (w, c) => {
@@ -286,6 +305,57 @@ export const EVENT_DEFS: EventDef[] = [
         causes: ['人口持续正增长', `粮食保障率 ${pct(c.macro.foodRatio)}`],
         effects: ['文明知名度提升（叙事性成就）'],
         severity: 0.2,
+      };
+    },
+  },
+  {
+    id: 'golden-age',
+    title: () => '治世',
+    category: 'achievement', cooldown: 20,
+    condition: (w, c) => c.macro.foodRatio > 1.2 && w.civ.vars.trust > 0.62 && w.civ.vars.unrest < 0.3 && c.macro.population > 300,
+    weight: (w) => 1 + w.civ.vars.trust,
+    apply: (w, c) => {
+      const v = w.civ.vars;
+      v.trust = Math.min(1, v.trust + 0.04);
+      v.education = Math.min(1, v.education + 0.015);
+      for (const s of w.settlements) if (!s.dead) s.effects.push({ kind: 'blessing', years: 3, power: 0.15 });
+      return {
+        text: `仓廪实而民心安。这个时代的孩童比他们的祖辈长得更高，工匠有余暇琢磨技艺，长者说这是罕见的治世。`,
+        causes: [`粮食保障率 ${pct(c.macro.foodRatio)}`, `制度信任 ${pct(v.trust)}`, `冲突风险仅 ${pct(v.unrest)}`],
+        effects: ['未来三年各聚落产出小幅提升', '文教水平上升'],
+        severity: 0.3,
+      };
+    },
+  },
+  {
+    id: 'migration-wave',
+    title: () => '移民潮',
+    category: 'migration', cooldown: 12,
+    condition: (w, c) => c.macro.housingRatio < 0.75 && c.macro.population > 400,
+    weight: (w, c) => (0.75 - c.macro.housingRatio) * 6,
+    apply: (w, c) => {
+      const crowding = (s: Settlement) => s.population / Math.max(1, housingCapacity(s));
+      const crowded = [...w.settlements].filter(s => !s.dead).sort((a, b) => crowding(b) - crowding(a));
+      const from = crowded[0] ?? w.settlements.find(s => !s.dead);
+      const roomy = [...w.settlements].filter(s => !s.dead && s.id !== from?.id && housingCapacity(s) > s.population * 1.1)
+        .sort((a, b) => housingCapacity(b) - housingCapacity(a))[0];
+      if (from && roomy) {
+        const n = Math.round(Math.min(from.population * 0.06, 30));
+        from.population -= n;
+        roomy.population += n;
+        return {
+          text: `${from.name}的巷子太挤了，一些家庭收拾行囊，沿着道路投奔了${roomy.name}。`,
+          causes: [`住房覆盖仅 ${pct(c.macro.housingRatio)}`, `${from.name} 人口 ${from.population} 逼近容量`],
+          effects: [`${n} 人迁往 ${roomy.name}`, '两地的物资与技艺随之流动'],
+          severity: 0.2,
+          settlementId: roomy.id,
+        };
+      }
+      return {
+        text: `各地都在闹房荒，没有谁家有多余的屋檐收留外人。`,
+        causes: [`住房覆盖仅 ${pct(c.macro.housingRatio)}`],
+        effects: ['生育率将受抑制'],
+        severity: 0.25,
       };
     },
   },
@@ -317,6 +387,17 @@ function nearMountain(w: WorldState, s: { x: number; y: number }): boolean {
 }
 function countNearMountain(w: WorldState): number {
   return w.settlements.filter(s => !s.dead && nearMountain(w, s)).length;
+}
+
+/** 是否存在领地毗邻的聚落对（战争的地缘温床） */
+function hasCloseNeighbors(w: WorldState): boolean {
+  const alive = w.settlements.filter(s => !s.dead);
+  for (let i = 0; i < alive.length; i++) {
+    for (let j = i + 1; j < alive.length; j++) {
+      if (Math.hypot(alive[i].x - alive[j].x, alive[i].y - alive[j].y) < 9) return true;
+    }
+  }
+  return false;
 }
 
 /** 年度事件调度：按权重随机挑一个满足条件的事件执行 */

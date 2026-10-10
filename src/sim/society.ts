@@ -2,8 +2,14 @@
  * SocietyClassifier — 社会形态识别
  * 不用年份/科技树解锁，而是由生产力、所有制、劳动关系、土地依附、
  * 市场程度、财富结构等变量加权评分，支持混合形态与识别变迁叙事。
+ *
+ * v2.0 硬性前置（历史一致性）：
+ * 一种社会形态只有在它的「物质与制度前提」具备时才有资格被识别——
+ * 奴隶制需要农业剩余与早期国家机器；封建需要高土地集中与依附劳动；
+ * 资本主义需要工业、市场与城市；社会主义需要高文教、公共服务与公有部门。
+ * 未达前置的形态不参与评分，彻底杜绝"住着窝棚的资本主义"这类错位。
  */
-import { FORM_NAMES, type WorldState, type SocietyForm } from '../types';
+import { FORM_NAMES, type WorldState, type SocietyForm, type SettlementStage } from '../types';
 import { macroEconomy } from './economy';
 
 export interface Classification {
@@ -11,6 +17,57 @@ export interface Classification {
   mixed: SocietyForm | null; // 得分接近的第二形态
   scores: Record<SocietyForm, number>;
   causes: string[]; // 主导形态的判定依据（真实变量描述）
+  /** 前置未达而被排除的形态（观察者面板展示用） */
+  blocked: { form: SocietyForm; missing: string[] }[];
+}
+
+/** 各形态的硬性前置条件 */
+function formGates(w: WorldState): Record<SocietyForm, string[]> {
+  const t = w.civ.tech.levels;
+  const lvl = (d: string) => t[d] ?? 1;
+  const v = w.civ.vars;
+  const macro = macroEconomy(w);
+  const stages = w.settlements.filter(s => !s.dead).map(s => s.stage);
+  const has = (min: SettlementStage) => stages.some(st => stageRank(st) >= stageRank(min));
+  const surplus = Math.max(0, Math.min(1, (macro.surplusRatio - 1) * 1.5));
+  const miss = (ok: boolean, label: string) => (ok ? null : label);
+
+  const slave: string[] = [];
+  let m: string | null;
+  if ((m = miss(lvl('agriculture') >= 4, `农耕技术不足（需4级，现${lvl('agriculture')}）`))) slave.push(m);
+  if ((m = miss(surplus >= 0.12, '农业剩余不足'))) slave.push(m);
+  if ((m = miss(v.stateCapacity >= 0.22, '国家机器未成型'))) slave.push(m);
+  if ((m = miss(has('village'), '尚无村庄规模的聚落'))) slave.push(m);
+  if ((m = miss(v.laborForced >= 0.12, '强制劳动未成规模'))) slave.push(m);
+
+  const feudal: string[] = [];
+  if ((m = miss(lvl('agriculture') >= 5, `农耕技术不足（需5级，现${lvl('agriculture')}）`))) feudal.push(m);
+  if ((m = miss(v.landConcentration >= 0.32, '土地尚未集中'))) feudal.push(m);
+  if ((m = miss(v.stateCapacity >= 0.28, '国家机器未成型'))) feudal.push(m);
+  if ((m = miss(has('town') || (has('village') && v.laborBonded >= 0.18), '聚落规模不足'))) feudal.push(m);
+  if ((m = miss(v.laborBonded >= 0.1, '依附劳动未成规模'))) feudal.push(m);
+
+  const capitalist: string[] = [];
+  if ((m = miss(lvl('industry') >= 3, `工业技术不足（需3级，现${lvl('industry')}）`))) capitalist.push(m);
+  if ((m = miss(v.market >= 0.5, '市场发育不足'))) capitalist.push(m);
+  if ((m = miss(macro.urbanization >= 0.18, '城市化不足'))) capitalist.push(m);
+  if ((m = miss(has('town'), '尚无城镇'))) capitalist.push(m);
+  if ((m = miss(v.laborWage >= 0.22, '雇佣劳动未成规模'))) capitalist.push(m);
+
+  const socialist: string[] = [];
+  if ((m = miss(lvl('industry') >= 4, `工业技术不足（需4级，现${lvl('industry')}）`))) socialist.push(m);
+  if ((m = miss(v.education >= 0.45, '文教水平不足'))) socialist.push(m);
+  if ((m = miss(v.publicServices >= 0.38, '公共服务不足'))) socialist.push(m);
+  if ((m = miss(v.participation >= 0.4, '政治参与不足'))) socialist.push(m);
+  if ((m = miss(v.ownPublic + v.laborCoop >= 0.42, '公有与合作部门不足'))) socialist.push(m);
+  if ((m = miss(has('town'), '尚无城镇作为公共治理的基础'))) socialist.push(m);
+  if ((m = miss(w.civ.form === 'capitalist' || v.laborWage > 0.15 || w.civ.prevForm !== null, '尚无成熟的社会组织（需从既有形态演进而来）'))) socialist.push(m);
+
+  return { primitive: [], slave, feudal, capitalist, socialist, collapsed: [] };
+}
+
+function stageRank(s: SettlementStage): number {
+  return { camp: 0, hamlet: 1, village: 2, town: 3, city: 4 }[s];
 }
 
 export function classifySociety(w: WorldState): Classification {
@@ -23,11 +80,16 @@ export function classifySociety(w: WorldState): Classification {
   const surplus = Math.max(0, Math.min(1, (macro.surplusRatio - 1) * 1.5));
 
   if (pop === 0) {
-    return { form: 'collapsed', mixed: null, scores: collapsedScores(), causes: ['聚落人口清零'] };
+    return {
+      form: 'collapsed', mixed: null, scores: collapsedScores(), causes: ['聚落人口清零'],
+      blocked: [],
+    };
   }
 
+  const gates = formGates(w);
+
   const scores: Record<SocietyForm, number> = {
-    // 原始：共有制 + 无农业剩余 + 低分工
+    // 原始：共有制 + 无农业剩余 + 低分工（始终有资格）
     primitive:
       v.ownCommon * 0.9
       + (farming ? 0 : 0.35)
@@ -36,7 +98,7 @@ export function classifySociety(w: WorldState): Classification {
       + (macro.settlementCount <= 1 && pop < 120 ? 0.15 : 0)
       - (v.laborForced + v.laborBonded) * 0.6,
     // 奴隶制：强制劳动占主导 + 存在剩余 + 国家机器
-    slave:
+    slave: gates.slave.length ? -1 :
       v.laborForced * 1.55
       + surplus * 0.18
       + v.stateCapacity * 0.18
@@ -44,7 +106,7 @@ export function classifySociety(w: WorldState): Classification {
       + v.ownPrivate * 0.15
       - v.market * 0.25,
     // 封建：土地集中 + 依附劳动 + 私有但不发达的市场
-    feudal:
+    feudal: gates.feudal.length ? -1 :
       v.laborBonded * 1.25
       + v.landConcentration * 0.75
       + v.ownPrivate * 0.2
@@ -52,14 +114,14 @@ export function classifySociety(w: WorldState): Classification {
       + (1 - v.market) * 0.10
       - Math.max(0, lvl('industry') - 1) * 0.22,
     // 资本主义：雇佣劳动 + 市场 + 工业技术
-    capitalist:
+    capitalist: gates.capitalist.length ? -1 :
       v.laborWage * 1.15
       + v.market * 0.6
       + Math.max(0, lvl('industry') - 1) * 0.32
       + v.ownPrivate * 0.22
       + v.wealthMiddle * 0.12,
     // 社会主义：公有/合作制 + 公共服务 + 参与
-    socialist:
+    socialist: gates.socialist.length ? -1 :
       (v.ownPublic + v.laborCoop) * 1.05 * (0.4 + v.publicServices * 2)
       + v.publicServices * 0.36
       + v.participation * 0.26
@@ -108,7 +170,10 @@ export function classifySociety(w: WorldState): Classification {
     ],
     collapsed: ['聚落人口清零'],
   };
-  return { form, mixed, scores, causes: causesMap[form] };
+  const blocked = (Object.keys(gates) as SocietyForm[])
+    .filter(k => gates[k].length > 0)
+    .map(k => ({ form: k, missing: gates[k] }));
+  return { form, mixed, scores, causes: causesMap[form], blocked };
 }
 
 function collapsedScores(): Record<SocietyForm, number> {

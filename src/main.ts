@@ -15,12 +15,12 @@ import { gridToScreen } from './render/iso';
 import { AudioManager } from './audio';
 import { icon } from './ui/icons';
 import {
-  buildHud, setHudSpeed, setHudPower, setHudBrush, updateTopbar, setMuteIcon, toast,
+  buildHud, setHudSpeed, setHudPower, setHudBrush, updateTopbar, setMuteIcon, toast, setToolbarCollapsed,
   type HudCallbacks,
 } from './ui/hud';
 import {
   openChronicle, openObserver, openSaveMenu, openHelp, openFormCard, openEventCard, closeModal,
-  showSettlementPanel, hideSettlementPanel, updateEventFeed, isModalOpen,
+  showSettlementPanel, hideSettlementPanel, collapseSettlementPanel, updateEventFeed, isModalOpen,
 } from './ui/panels';
 import { WORLD_TITLES } from './names';
 import { autosave, loadAutosave, serialize as serializeSave, deserialize as deserializeSave } from './saves';
@@ -71,11 +71,11 @@ class Game {
                 </div>
               </div>
               <div class="form-item">
-                <label>地图规模</label>
+                <label>地图规模（v2.0 全面扩大）</label>
                 <select id="new-size">
-                  <option value="40">紧凑 40×40</option>
-                  <option value="48" selected>标准 48×48</option>
-                  <option value="56">宽广 56×56</option>
+                  <option value="64">中等 64×64</option>
+                  <option value="96" selected>标准 96×96</option>
+                  <option value="128">辽阔 128×128</option>
                 </select>
               </div>
               <div class="form-item">
@@ -123,11 +123,31 @@ class Game {
       </div>
       <div id="game" class="hidden">
         <div id="main-area">
-          <canvas id="world-canvas"></canvas>
+          <div id="game-viewport">
+            <canvas id="world-canvas"></canvas>
+          </div>
         </div>
       </div>
       <div id="modal-root"></div>
       <div id="toasts"></div>`;
+    this.bindViewportResize();
+  }
+
+  /** 方形取景框：取主区宽高的较小者，居中（能看到整张沙盘） */
+  private bindViewportResize() {
+    const fit = () => {
+      const area = document.getElementById('main-area');
+      const vp = document.getElementById('game-viewport');
+      if (!area || !vp) return;
+      const w = area.clientWidth, h = area.clientHeight;
+      const side = Math.max(300, Math.min(w, h));
+      vp.style.width = `${side}px`;
+      vp.style.height = `${side}px`;
+      this.vw?.resize();
+    };
+    window.addEventListener('resize', fit);
+    // 游戏界面显示后也要重算一次（main-area 尺寸在隐藏时为 0）
+    (window as any).__fitViewport = fit;
   }
 
   // ---------- 菜单 ----------
@@ -189,13 +209,13 @@ class Game {
     if (this.menuWorld) return;
     const canvas = document.getElementById('menu-canvas') as HTMLCanvasElement;
     this.menuCanvas = canvas;
-    this.menuWorld = newWorld({ seed: 4242, size: 48, mode: 'free', settlements: 2, scenario: 'valley' });
+    this.menuWorld = newWorld({ seed: 4242, size: 64, mode: 'free', settlements: 2, scenario: 'valley' });
     // 预跑几十年让世界有内容
     for (let i = 0; i < 60; i++) tickYear(this.menuWorld);
     this.menuVw = new VisualWorld(canvas);
-    this.menuVw.camera.zoom = 0.62;
-    this.menuVw.camera.targetZoom = 0.66;
-    this.menuVw.centerOnMap(48);
+    this.menuVw.camera.zoom = 0.5;
+    this.menuVw.camera.targetZoom = 0.56;
+    this.menuVw.centerOnMap(64);
   }
 
   // ---------- 游戏世界 ----------
@@ -240,14 +260,19 @@ class Game {
     this.vw = new VisualWorld(canvas);
     this.vw.minimap = document.createElement('canvas');
     this.vw.minimap.width = this.vw.minimap.height = w.config.size;
-    this.vw.centerOnMap(w.config.size);
+    this.vw.terrainCache.dirty = true;
+    (window as any).__fitViewport?.();
+    this.vw.fitMap(w.config.size);
     this.bindCanvasInput(canvas);
     this.bindKeys();
     this.audio.ensure();
     setHudSpeed(hud.topbar, 1);
     setHudPower(hud.toolbar, null);
+    // 恢复工具栏收缩状态
+    const tbCollapsed = localStorage.getItem('society-lab-tb-collapsed') === '1';
+    if (tbCollapsed) setToolbarCollapsed(hud.toolbar, true);
     updateTopbar(gameEl, w, name);
-    this.showHint('选择左侧神力，点击地图施放 · 拖拽移动 · 空格暂停', 5000);
+    this.showHint('全景开局 · 滚轮放大细看 · H 回到全景 · 左侧选择神力', 5200);
     toast(`世界「${name}」已苏醒`, 'good', 'seed');
   }
 
@@ -280,22 +305,25 @@ class Game {
       },
       onPower: id => {
         if (!this.world) return;
-        if (id === 'enlighten' || id === 'ideas') {
+        if (id === 'enlighten' || id === 'ideas' || id === 'heal') {
           const res = castCivPower(this.world, id);
           if (res.ok) {
             const entry = powerChronicleEntry(this.world, id, res);
             this.world.chronicle.push(entry);
             this.audio.power();
             this.flash('#7fc7ad', 0.35);
-            toast(res.message, 'good', id === 'enlighten' ? 'enlighten' : 'ideas');
+            const s = this.world.settlements.find(x => !x.dead);
+            if (s && id === 'heal') this.vw?.fx.spawn('heal', s.x, s.y, 6);
+            toast(res.message, 'good', id === 'enlighten' ? 'enlighten' : id === 'heal' ? 'heal' : 'ideas');
             this.refreshHud();
           } else toast(res.message, 'bad', 'alert');
           return;
         }
         this.activePower = this.activePower === id ? null : id;
         setHudPower(this.els.toolbar, this.activePower);
+        const def = GOD_POWERS.find(p => p.id === id);
         this.showHint(this.activePower
-          ? `神力就绪：点击地图施放（右键/Esc 取消）`
+          ? `神力就绪：${def?.name ?? ''} · 点击地图施放（右键/Esc 取消）${def?.brush ? ' · 可调笔刷' : ''}`
           : '检视模式：点击聚落查看详情', 2600);
       },
       onBrush: r => {
@@ -318,7 +346,10 @@ class Game {
         this.audio.setMuted(!this.audio.muted);
         setMuteIcon(this.els.topbar, this.audio.muted);
       },
-      onHome: () => this.vw && this.world && this.vw.centerOnMap(this.world.config.size),
+      onHome: () => this.vw && this.world && this.vw.fitMap(this.world.config.size),
+      onCollapseToolbar: (collapsed) => {
+        localStorage.setItem('society-lab-tb-collapsed', collapsed ? '1' : '0');
+      },
     };
   }
 
@@ -438,10 +469,16 @@ class Game {
       if (moved <= 6 && e.target === canvas) this.handleClick(e.clientX, e.clientY, e.button);
     });
     canvas.addEventListener('wheel', e => {
-      if (!this.vw) return;
+      if (!this.vw || !this.world) return;
       e.preventDefault();
       const factor = e.deltaY > 0 ? 0.88 : 1.14;
-      this.vw.camera.targetZoom = Math.max(0.4, Math.min(2.6, this.vw.camera.targetZoom * factor));
+      // 缩放下限随地图自适应：允许缩到全景之外一点
+      const rect = this.vw.canvas.getBoundingClientRect();
+      const fitZoom = Math.min(
+        rect.width / (this.world.config.size * 64),
+        rect.height / (this.world.config.size * 32 + 72),
+      ) * 0.96;
+      this.vw.camera.targetZoom = Math.max(fitZoom * 0.75, Math.min(2.8, this.vw.camera.targetZoom * factor));
     }, { passive: false });
     canvas.addEventListener('contextmenu', e => {
       e.preventDefault();
@@ -467,12 +504,23 @@ class Game {
     if (this.activePower) {
       const res = castBrushPower(this.world, this.activePower, tile.x, tile.y, this.brush);
       if (res.ok) {
-        const entry = powerChronicleEntry(this.world, this.activePower, res);
-        this.world.chronicle.push(entry);
-        this.vw.minimapDirty = true;
-        this.vw.addPing(tile.x, tile.y, 'rgba(127,199,173,0.9)');
+        // 陨星在 castMeteor 内部已记录编年史，不重复记录
+        if (this.activePower !== 'meteor') {
+          const entry = powerChronicleEntry(this.world, this.activePower, res);
+          this.world.chronicle.push(entry);
+        }
+        // 地形变化 → 重建缓存与小地图
+        const terrainPowers: GodPowerId[] = ['forest', 'fertile', 'meadow', 'water', 'ore', 'uplift', 'meteor', 'wildfire'];
+        if (terrainPowers.includes(this.activePower)) {
+          this.vw.terrainCache.dirty = true;
+          this.vw.minimapDirty = true;
+        }
+        // 特效
+        this.vw.fx.spawnForPower(this.activePower, tile.x, tile.y, this.world);
+        this.vw.addPing(tile.x, tile.y, this.activePower === 'drought' || this.activePower === 'meteor' ? 'rgba(220,120,80,0.95)' : 'rgba(127,199,173,0.9)');
         this.audio.power();
-        this.flash(this.activePower === 'drought' ? 'rgb(216,160,80)' : 'rgb(127,199,173)', 0.28);
+        if (this.activePower === 'meteor') this.flash('#ffb060', 0.4);
+        else this.flash(this.activePower === 'drought' ? 'rgb(216,160,80)' : 'rgb(127,199,173)', 0.28);
         toast(res.message, 'good', this.activePower);
         this.refreshHud();
       } else {
@@ -517,16 +565,26 @@ class Game {
         case '1': this.speed = 1; setHudSpeed(this.els.topbar, 1); break;
         case '2': this.speed = 2; setHudSpeed(this.els.topbar, 2); break;
         case '3': this.speed = 4; setHudSpeed(this.els.topbar, 4); break;
+        case '4': this.speed = 8; setHudSpeed(this.els.topbar, 8); break;
+        case 'Tab':
+          e.preventDefault();
+          {
+            const tb = this.els.toolbar;
+            const collapsed = !tb.classList.contains('collapsed');
+            setToolbarCollapsed(tb, collapsed);
+            localStorage.setItem('society-lab-tb-collapsed', collapsed ? '1' : '0');
+          }
+          break;
         case 'Escape':
           if (this.activePower) {
             this.activePower = null;
             setHudPower(this.els.toolbar, null);
           } else {
-            hideSettlementPanel(this.els.sidepanel);
+            if (!(this.els.sidepanel as HTMLElement).classList.contains('hidden')) collapseSettlementPanel(this.els.sidepanel);
           }
           break;
         case 'h': case 'H':
-          this.vw?.centerOnMap(this.world.config.size);
+          this.vw?.fitMap(this.world.config.size);
           break;
         case 'c': case 'C': openChronicle(this.world, this.panelActions()); break;
         case 'o': case 'O': openObserver(this.world); break;
@@ -581,7 +639,7 @@ class Game {
     const w = this.world;
     this.refreshHud();
 
-    // 事件提示
+    // 事件提示 + 视觉特效
     for (const ev of report.events) {
       if (ev.category === 'institution') {
         this.playSfx('era');
@@ -596,10 +654,8 @@ class Game {
       } else if (ev.category === 'invention' || ev.category === 'achievement') {
         this.playSfx('milestone');
       }
-      if (ev.settlementId !== undefined) {
-        const s = w.settlements.find(x => x.id === ev.settlementId);
-        if (s && ev.category !== 'institution' && ev.severity > 0.55) this.vw?.addPing(s.x, s.y, 'rgba(220,120,80,0.9)');
-      }
+      // 事件 → 沙盘上的真实视觉表现（v2.0）
+      this.vw?.fx.spawnForEvent(w, ev);
     }
 
     // 事件流
@@ -629,7 +685,7 @@ class Game {
 }
 
 // ---------- OhMyGame 玩法测试桥（开发模式） ----------
-if (import.meta.env?.DEV) {
+if ((import.meta as any).env?.DEV) {
   (window as any).__OHMYGAME_PLAYTEST__ = {
     snapshot: () => {
       const g = (window as any).__game as Game | undefined;

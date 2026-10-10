@@ -324,13 +324,17 @@ export function openObserver(w: WorldState) {
             </div>`).join('')}
         </div>
         <div class="obs-chart">
-          <h5>社会形态评分</h5>
-          ${formScores.map(([k, s]) => `
-            <div class="obs-var-row">
+          <h5>社会形态评分（灰 = 前置未达）</h5>
+          ${formScores.map(([k, sc]) => {
+            const gated = sc < 0;
+            const gate = cls.blocked.find(b => b.form === k);
+            return `
+            <div class="obs-var-row" title="${gated ? '缺少：' + gate!.missing.join('、') : ''}">
               <span class="n">${FORM_NAMES_FALLBACK(k)}</span>
-              <div class="track"><div class="fill" style="width:${Math.max(3, s / maxScore * 100)}%;background:${k === cls.form ? '#c9a227' : '#8a8070'}"></div></div>
-              <span class="v">${s.toFixed(2)}</span>
-            </div>`).join('')}
+              <div class="track"><div class="fill" style="width:${gated ? 4 : Math.max(3, sc / maxScore * 100)}%;background:${k === cls.form ? '#c9a227' : gated ? '#9a9284' : '#8a8070'}"></div></div>
+              <span class="v">${gated ? '未达' : sc.toFixed(2)}</span>
+            </div>`;
+          }).join('')}
           <div style="font-size:11.5px;color:var(--ink-soft);margin-top:8px">判定：${formLabel(cls)}（自第 ${w.civ.formSince} 年起）</div>
         </div>
         <div class="obs-chart">
@@ -372,6 +376,10 @@ export function openFormCard(w: WorldState) {
     socialist: '生产资料转入公共与合作之手。分配规则、公共服务与社会参与被重新设计；治理效率与创新激励是持久的考验。',
     collapsed: '聚落人口清零，文明归于寂静。但它留下的废墟仍在讲述往事。',
   };
+  const blockedRows = cls.blocked.length ? `
+      <div class="ce-section"><h5>其它形态的欠缺条件（历史不会跳级）</h5>
+        <ul>${cls.blocked.map(b => `<li><b>${FORM_NAMES_FALLBACK(b.form)}</b>：${b.missing.join('、')}</li>`).join('')}</ul>
+      </div>` : '';
   openModal(`
     <div class="modal-head">
       <span class="mh-ic" style="background:#c9a227">${icon('branch', 18)}</span>
@@ -381,6 +389,7 @@ export function openFormCard(w: WorldState) {
     <div class="modal-body">
       <div class="event-card-text">${desc[cls.form]}</div>
       <div class="ce-section"><h5>判定依据</h5><ul>${cls.causes.map(c => `<li>${c}</li>`).join('')}</ul></div>
+      ${blockedRows}
       <div class="ce-section effects"><h5>制度结构</h5>
         <ul>
           <li>所有制：共有 ${Math.round(v.ownCommon * 100)}% · 私有 ${Math.round(v.ownPrivate * 100)}% · 公有 ${Math.round(v.ownPublic * 100)}%</li>
@@ -513,47 +522,49 @@ export function openHelp() {
       <div class="help-cols">
         <div class="help-col">
           <h5>目标</h5>
-          <p>你是这个世界的神。观察文明生长，或在关键时刻施加神力——让历史走向不同的岔路。</p>
+          <p>你是这个世界的神。观察文明从部落生长为城市、从原始平等演化为各种社会形态，或在关键时刻施加神力——让历史走向不同的岔路。</p>
           <h5>摄像机</h5>
           <ul>
-            <li>拖拽：移动视角</li>
-            <li>滚轮：缩放（0.4×–2.6×）</li>
-            <li><kbd>H</kbd>：回到全景 · 点击聚落名可聚焦</li>
+            <li>拖拽：移动视角 · 滚轮：缩放</li>
+            <li><kbd>H</kbd>：全景（缩放到整张地图）· <kbd>F</kbd>：聚焦最大聚落</li>
             <li>右下角小地图：点击跳转</li>
           </ul>
           <h5>时间</h5>
           <ul>
-            <li><kbd>空格</kbd> 暂停/继续 · <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd> 调速</li>
-            <li>暂停时可单步推进（⏭ 按钮）</li>
+            <li><kbd>空格</kbd> 暂停/继续 · <kbd>1</kbd><kbd>2</kbd><kbd>3</kbd><kbd>4</kbd> 调速（1×~8×）</li>
+            <li>暂停时可单步推进一年（⏭ 按钮）</li>
           </ul>
-          <h5>神力</h5>
+          <h5>界面</h5>
           <ul>
-            <li>左侧选择神力 → 地图上点击施放</li>
-            <li>笔刷大小：小/中/大</li>
-            <li><kbd>Esc</kbd> 或右键取消神力</li>
-            <li>有限干预模式下消耗神力能量（每年恢复）</li>
+            <li><kbd>Tab</kbd> 或左侧箭头：收起/展开神力栏</li>
+            <li>右侧详情面板可收起（点击聚落后展开）</li>
+            <li><kbd>C</kbd> 编年史 · <kbd>O</kbd> 观察者 · <kbd>S</kbd> 存档</li>
           </ul>
         </div>
         <div class="help-col">
-          <h5>检视</h5>
+          <h5>神力（17 种）</h5>
           <ul>
-            <li>检视模式点击聚落：查看人口/建筑/粮储</li>
-            <li>事件卡显示起因（真实变量）与结果</li>
-            <li><kbd>C</kbd> 编年史 · <kbd>O</kbd> 观察者数据 · <kbd>S</kbd> 存档</li>
+            <li>造物：森林 / 沃土 / 草原 / 涌泉 / 矿藏 / 造山</li>
+            <li>天象：唤雨 / 降旱</li>
+            <li>灾厄：陨星 / 风暴 / 野火 / 瘟疫</li>
+            <li>启蒙：祝福 / 启蒙 / 思想 / 治愈 / 奠基新聚落</li>
+            <li>笔刷大小：小/中/大 · <kbd>Esc</kbd> 或右键取消</li>
+            <li>有限干预模式下消耗神力能量（每年恢复）</li>
           </ul>
           <h5>社会如何演化</h5>
           <ul>
-            <li>食物盈余 → 人口增长、分工、财富分化</li>
-            <li>土地集中 + 依附劳动 → 封建倾向</li>
-            <li>战争俘虏 → 强制劳动 → 奴隶制倾向</li>
-            <li>市场 + 工业 → 雇佣劳动 → 资本主义</li>
+            <li>聚落会长大：部落 → 村庄 → 城镇 → 城市，名字随之演进</li>
+            <li>食物盈余 + 技术 → 分工、财富分化、时代建筑</li>
+            <li>战争俘虏 → 强制劳动 → 奴隶制（需农业剩余与国家机器）</li>
+            <li>土地集中 + 依附劳动 + 庄园 → 封建</li>
+            <li>市场 + 工业 + 城市 → 雇佣劳动 → 资本主义</li>
             <li>组织 + 思想 + 公共性 → 社会主义</li>
-            <li>没有必然路线——不同条件走向不同历史</li>
+            <li>历史不会跳级：形态判定有硬性前置（点顶栏徽章查看）</li>
           </ul>
           <h5>实验</h5>
           <ul>
-            <li>存档面板可记录分支节点</li>
-            <li>从任一节点创建平行世界，比较两条历史</li>
+            <li>存档面板可记录分支节点，从任一节点创建平行世界</li>
+            <li>相同种子 + 相同干预 = 相同历史（可复现）</li>
           </ul>
         </div>
       </div>
@@ -568,46 +579,67 @@ export function showSettlementPanel(sidepanel: HTMLElement, w: WorldState, s: Se
   const counts = new Map<string, number>();
   for (const b of s.buildings) counts.set(b.kind, (counts.get(b.kind) ?? 0) + 1);
   sidepanel.innerHTML = `
-    <h3>${icon('people', 17)} ${s.name}</h3>
-    <div class="sub">${STAGE_NAMES[s.stage]} · 建立于第 ${s.founded} 年 · ${s.dead ? '已废弃' : '发展中'}</div>
-    <div class="sp-section">
-      <h5>人口与生存</h5>
-      <div class="kv"><span class="k">人口</span><span class="v">${s.population}</span></div>
-      <div class="kv"><span class="k">住房</span><span class="v">${housing} / ${s.population}${housing < s.population ? ' ⚠' : ''}</span></div>
-      <div class="kv"><span class="k">粮储（人·年）</span><span class="v">${Math.round(s.food)}</span></div>
-      <div class="kv"><span class="k">短缺年数</span><span class="v">${s.shortageYears}</span></div>
-      <div class="kv"><span class="k">木材 / 石 / 金属</span><span class="v">${Math.round(s.wood)} / ${Math.round(s.stone)} / ${Math.round(s.metal)}</span></div>
+    <div class="sp-head">
+      <h3>${icon('people', 17)} ${s.name}</h3>
+      <button id="sp-collapse" title="收起面板">${icon('chevron-right', 14)}</button>
     </div>
-    <div class="sp-section">
-      <h5>建筑（${s.buildings.length}）</h5>
-      ${s.buildings.length === 0 ? '<div class="kv"><span class="k">暂无</span></div>' : ''}
-      ${[...counts.entries()].map(([k, n]) => `<span class="building-chip">${BUILDINGS[k]?.name ?? k} ×${n}</span>`).join('')}
-      ${s.construction.length ? `<div class="kv" style="margin-top:6px"><span class="k">在建</span><span class="v">${s.construction.map(b => BUILDINGS[b.kind]?.name ?? b.kind).join('、')}</span></div>` : ''}
-    </div>
-    <div class="sp-section">
-      <h5>当前危机</h5>
-      ${s.shortageYears > 0 ? '<div class="kv"><span class="k">⚠ 口粮短缺</span><span class="v">连续 ' + s.shortageYears + ' 年</span></div>' : ''}
-      ${w.activeEvents.some(a => a.id === 'plague-outbreak' && a.data.settlementId === s.id) ? '<div class="kv"><span class="k">⚠ 疫病流行中</span><span class="v">可净化</span></div>' : ''}
-      ${s.shortageYears === 0 && !w.activeEvents.some(a => a.id === 'plague-outbreak' && a.data.settlementId === s.id) ? '<div class="kv"><span class="k">（暂无）</span></div>' : ''}
-    </div>
-    <div class="sp-section">
-      <h5>宏观对照</h5>
-      <div class="kv"><span class="k">全域人口</span><span class="v">${macro.population}</span></div>
-      <div class="kv"><span class="k">粮食保障</span><span class="v">${Math.round(macro.foodRatio * 100)}%</span></div>
-    </div>
-    <div class="sp-actions">
-      <button class="btn small primary" id="sp-focus">${icon('focus', 13)} 聚焦</button>
-      <button class="btn small gold" id="sp-bless" title="12⚡">${icon('blessing', 13)} 祝福</button>
-      <button class="btn small" id="sp-close">${icon('close', 13)} 关闭</button>
+    <div class="sp-inner">
+      <div class="sub">${STAGE_NAMES[s.stage]} · 建立于第 ${s.founded} 年 · ${s.dead ? '已废弃' : '发展中'}</div>
+      <div class="sp-section">
+        <h5>人口与生存</h5>
+        <div class="kv"><span class="k">人口</span><span class="v">${s.population}</span></div>
+        <div class="kv"><span class="k">住房</span><span class="v">${housing} / ${s.population}${housing < s.population ? ' ⚠' : ''}</span></div>
+        <div class="kv"><span class="k">粮储（人·年）</span><span class="v">${Math.round(s.food)}</span></div>
+        <div class="kv"><span class="k">短缺年数</span><span class="v">${s.shortageYears}</span></div>
+        <div class="kv"><span class="k">木材 / 石 / 金属</span><span class="v">${Math.round(s.wood)} / ${Math.round(s.stone)} / ${Math.round(s.metal)}</span></div>
+      </div>
+      <div class="sp-section">
+        <h5>建筑（${s.buildings.length}）</h5>
+        ${s.buildings.length === 0 ? '<div class="kv"><span class="k">暂无</span></div>' : ''}
+        ${[...counts.entries()].map(([k, n]) => `<span class="building-chip">${BUILDINGS[k]?.name ?? k} ×${n}</span>`).join('')}
+        ${s.construction.length ? `<div class="kv" style="margin-top:6px"><span class="k">在建</span><span class="v">${s.construction.map(b => BUILDINGS[b.kind]?.name ?? b.kind).join('、')}</span></div>` : ''}
+      </div>
+      <div class="sp-section">
+        <h5>当前危机</h5>
+        ${s.shortageYears > 0 ? '<div class="kv"><span class="k">⚠ 口粮短缺</span><span class="v">连续 ' + s.shortageYears + ' 年</span></div>' : ''}
+        ${w.activeEvents.some(a => a.id === 'plague-outbreak' && a.data.settlementId === s.id) ? '<div class="kv"><span class="k">⚠ 疫病流行中</span><span class="v">可净化</span></div>' : ''}
+        ${s.shortageYears === 0 && !w.activeEvents.some(a => a.id === 'plague-outbreak' && a.data.settlementId === s.id) ? '<div class="kv"><span class="k">（暂无）</span></div>' : ''}
+      </div>
+      <div class="sp-section">
+        <h5>宏观对照</h5>
+        <div class="kv"><span class="k">全域人口</span><span class="v">${macro.population}</span></div>
+        <div class="kv"><span class="k">粮食保障</span><span class="v">${Math.round(macro.foodRatio * 100)}%</span></div>
+      </div>
+      <div class="sp-actions">
+        <button class="btn small primary" id="sp-focus">${icon('focus', 13)} 聚焦</button>
+        <button class="btn small gold" id="sp-bless" title="12⚡">${icon('blessing', 13)} 祝福</button>
+        <button class="btn small" id="sp-close">${icon('close', 13)} 关闭</button>
+      </div>
     </div>`;
   sidepanel.classList.remove('hidden');
+  sidepanel.classList.remove('collapsed');
+  document.getElementById('game')?.classList.add('sp-open');
+  // 收起态点击面板任意处 → 重新展开（onclick 属性避免监听器堆叠）
+  sidepanel.onclick = () => {
+    if (sidepanel.classList.contains('collapsed')) {
+      sidepanel.classList.remove('collapsed');
+      document.getElementById('game')?.classList.add('sp-open');
+    }
+  };
   sidepanel.querySelector('#sp-focus')!.addEventListener('click', () => actions.focusSettlement(s));
   sidepanel.querySelector('#sp-bless')!.addEventListener('click', () => actions.castBlessingAt(s));
-  sidepanel.querySelector('#sp-close')!.addEventListener('click', () => sidepanel.classList.add('hidden'));
+  sidepanel.querySelector('#sp-close')!.addEventListener('click', () => hideSettlementPanel(sidepanel));
+  sidepanel.querySelector('#sp-collapse')!.addEventListener('click', () => collapseSettlementPanel(sidepanel));
+}
+
+export function collapseSettlementPanel(sidepanel: HTMLElement) {
+  sidepanel.classList.add('collapsed');
+  document.getElementById('game')?.classList.remove('sp-open');
 }
 
 export function hideSettlementPanel(sidepanel: HTMLElement) {
   sidepanel.classList.add('hidden');
+  document.getElementById('game')?.classList.remove('sp-open');
 }
 
 export function updateEventFeed(feed: HTMLElement, w: WorldState, actions: PanelActions, lastSeen: number) {

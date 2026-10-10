@@ -1,17 +1,29 @@
 /**
  * TechnologySystem — 知识积累与技术发展
- * 知识点 = 人口 × 教育 × 分工 × 稳定。按时代需求权重分配到八个域。
- * 跨越整数等级时产生「发明」事件（由事件系统叙事化）。
+ * v2.0：知识产出主要由城市化、文教与分工驱动（而非单纯人口堆积），
+ * 并引入跨域前置链（如工业需要工具+营造+商贸），使技术史符合依赖顺序。
  */
 import { TechDomain, TECH_NAMES, type WorldState } from '../types';
 
 export const TECH_DOMAINS: TechDomain[] = Object.values(TechDomain);
 
-/** 升到 level 所需累计知识点（level>=2） */
+/** 升到 level 所需累计知识点（level>=2）。指数 1.7：后期升级显著变慢 */
 export function techCost(level: number): number {
   if (level <= 1) return 0;
-  return Math.round(8 * Math.pow(level - 1, 1.55));
+  return Math.round(24 * Math.pow(level - 1, 1.7));
 }
+
+/**
+ * 跨域前置：不满足时该域不再积累知识点（知识点流向其他域）。
+ * 这保证技术史符合现实依赖（无文字则难有官僚科层，无手工与商贸则无工业）。
+ */
+export const TECH_PREREQS: Partial<Record<TechDomain, Partial<Record<TechDomain, number>>>> = {
+  [TechDomain.Commerce]: { [TechDomain.Agriculture]: 3 },
+  [TechDomain.Governance]: { [TechDomain.Education]: 2 },
+  [TechDomain.Building]: { [TechDomain.Crafting]: 2 },
+  [TechDomain.Industry]: { [TechDomain.Crafting]: 5, [TechDomain.Building]: 4, [TechDomain.Commerce]: 3, [TechDomain.Education]: 3 },
+  [TechDomain.Medicine]: { [TechDomain.Education]: 2 },
+};
 
 /** 域的时代亲和权重：越贴合当前社会需要，分到的知识点越多 */
 function domainWeights(w: WorldState): Record<string, number> {
@@ -19,14 +31,14 @@ function domainWeights(w: WorldState): Record<string, number> {
   const v = w.civ.vars;
   const starving = totalFoodRatio(w) < 1.05;
   return {
-    agriculture: 1.6 + (starving ? 1.6 : 0) + t.agriculture * 0.05,
+    agriculture: 1.6 + (starving ? 1.8 : 0) + t.agriculture * 0.05,
     crafting: 1.2 + v.specialization * 0.8,
     building: 0.8 + Math.min(1, w.settlements.reduce((s, x) => s + x.population, 0) / 600),
     commerce: v.market * 1.2 + (w.settlements.filter(s => !s.dead).length >= 2 ? 0.5 : 0),
     governance: 0.4 + v.stateCapacity * 0.6 + (v.unrest > 0.45 ? 1.2 : 0),
     medicine: 0.5 + (v.livingStandard > 0.4 ? 0.6 : 0),
-    industry: t.crafting >= 4 && t.building >= 3 ? 1.4 + v.market * 0.8 : 0,
-    education: v.wealthMiddle * 0.8 + v.livingStandard * 0.6,
+    industry: t.crafting >= 5 && t.building >= 4 ? 1.4 + v.market * 0.8 : 0,
+    education: 0.45 + v.wealthMiddle * 0.8 + v.livingStandard * 0.6,
   };
 }
 
@@ -53,17 +65,48 @@ export function tickTechnology(w: WorldState): { domain: TechDomain; level: numb
   const v = w.civ.vars;
   const pop = w.settlements.reduce((s, x) => s + (x.dead ? 0 : x.population), 0);
   const stability = 0.6 + v.trust * 0.4 - v.unrest * 0.25;
-  const points = pop * 0.02 * (0.5 + v.education) * (1 + v.specialization * 0.6) * Math.max(0.25, stability)
-    + w.civ.enlightenment * 2.2; // 神力启蒙直接注入知识
+
+  // 城市化人口：住在城镇及以上的人
+  let urbanPop = 0;
+  for (const s of w.settlements) {
+    if (s.dead) continue;
+    if (s.population >= 400) urbanPop += s.population;
+    else if (s.population >= 150) urbanPop += s.population * 0.6;
+  }
+
+  // v2.0：人口边际递减（pop^0.88）+ 饱和阻尼（平均等级越高越难再进步）。
+  // 城市化是知识的主要引擎，防止“人多 = 全科技满级”的失控。
+  const levels = TECH_DOMAINS.map(d => w.civ.tech.levels[d] ?? 1);
+  const avgLevel = levels.reduce((a, b) => a + b, 0) / levels.length;
+  const saturationDamp = 1 / (1 + Math.max(0, avgLevel - 3) * 0.28);
+  const points = Math.pow(pop, 0.88) * 0.028 * (0.35 + v.education * 0.9) * (0.5 + v.specialization * 1.1) * Math.max(0.25, stability) * saturationDamp
+    + urbanPop * 0.0075 * Math.max(0.25, stability) * saturationDamp
+    + w.civ.enlightenment * 1.8; // 神力启蒙直接注入知识
   w.civ.tech.points += points;
   w.civ.enlightenment *= 0.94;
 
   const weights = domainWeights(w);
-  const total = Object.values(weights).reduce((a, b) => a + b, 0);
-  const gained = points / Math.max(0.001, total);
+  // 前置门控：未达前置的域权重清零（知识点流向其他域）
+  const gated = new Set<TechDomain>();
+  for (const d of TECH_DOMAINS) {
+    const req = TECH_PREREQS[d];
+    if (!req) continue;
+    for (const [dep, lvl] of Object.entries(req)) {
+      if ((w.civ.tech.levels[dep as TechDomain] ?? 1) < (lvl as number)) { gated.add(d); break; }
+    }
+  }
+  const effWeights: Record<string, number> = {};
+  let total = 0;
+  for (const d of TECH_DOMAINS) {
+    effWeights[d] = gated.has(d) ? 0 : (weights[d] ?? 0);
+    total += effWeights[d];
+  }
+  if (total <= 0.001) { for (const d of TECH_DOMAINS) effWeights[d] = 1; total = TECH_DOMAINS.length; }
+
+  const gained = points / total;
   const levelUps: { domain: TechDomain; level: number }[] = [];
   for (const d of TECH_DOMAINS) {
-    w.civ.tech.progress[d] = (w.civ.tech.progress[d] ?? 0) + gained * (weights[d] ?? 0);
+    w.civ.tech.progress[d] = (w.civ.tech.progress[d] ?? 0) + gained * effWeights[d];
     let lvl = w.civ.tech.levels[d] ?? 1;
     while (lvl < 9 && w.civ.tech.progress[d] >= techCost(lvl + 1)) {
       lvl++;

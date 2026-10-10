@@ -3,12 +3,12 @@
  * 顺序：天气衰减 → 技术 → 生产/人口 → 建造 → 制度 → 形态识别 →
  *       冲突 → 事件 → 编年史 → 快照 → 神力能量恢复。
  */
-import { CFG } from '../config';
-import { Rng, type WorldState, type EventRecord } from '../types';
+import { CFG, STAGE_THRESHOLDS } from '../config';
+import { Rng, type WorldState, type EventRecord, type SettlementStage } from '../types';
 import { generateWorld } from '../worldgen';
-import { settlementName, WORLD_TITLES } from '../names';
+import { settlementName, renameForStage, WORLD_TITLES } from '../names';
 import { tickTechnology } from './technology';
-import { tickSettlementEconomy, advanceConstruction, checkStageChange, macroEconomy } from './economy';
+import { tickSettlementEconomy, advanceConstruction, macroEconomy } from './economy';
 import { tickPopulation } from './population';
 import { tickInstitutions } from './institutions';
 import { classifySociety, transitionStory } from './society';
@@ -24,6 +24,9 @@ export interface TickReport {
   deaths: number;
   births: number;
 }
+
+/** 形态判定回滞（连续 3 年一致才切换；读档后重置属可接受行为） */
+const formHysteresis = new WeakMap<WorldState, { form: import('../types').SocietyForm; count: number }>();
 
 /** 从配置新建世界（含初始聚落） */
 export function newWorld(config: {
@@ -151,36 +154,63 @@ export function tickYear(w: WorldState): TickReport {
   report.famine = anyFamine;
   w.civ.vars.population = w.settlements.reduce((a, s) => a + (s.dead ? 0 : s.population), 0);
 
-  // 4. 阶段跃迁检测（在事件前）
+  // 4. 阶段变迁检测（v2.0：统一在此检测开/降级，聚落随阶段改名）
   const stageUps: number[] = [];
+  const usedNames = new Set(w.settlements.map(x => x.name));
   for (const s of w.settlements) {
-    const was = s.stage;
-    // 注意 checkStageChange 已在建造完成时调用；这里做人口下降的降级检测
-    if (checkStageDowngrade(s, was)) stageUps.push(-s.id - 1000);
+    if (s.dead) continue;
+    let target: SettlementStage = 'camp';
+    for (const { stage, pop } of STAGE_THRESHOLDS) {
+      if (s.population >= pop) target = stage;
+    }
+    if (target !== s.stage) {
+      const up = stageRank(target) > stageRank(s.stage);
+      s.stage = target;
+      s.name = renameForStage(s.name, target, usedNames);
+      if (up) stageUps.push(s.id);
+      else {
+        report.events.push({
+          id: `ev-${w.nextEventId++}`, year: w.year, title: `${s.name}的衰退`,
+          category: 'urban', text: `${s.name}因人口流失而萎缩为${stageName(s.stage)}。`,
+          causes: [`人口降至 ${s.population}`], effects: [`聚落等级 → ${stageName(s.stage)}`],
+          intervened: false, severity: 0.4, settlementId: s.id,
+        });
+      }
+    }
   }
 
   // 5. 制度
   tickInstitutions(w);
 
-  // 6. 社会形态识别与变迁
+  // 6. 社会形态识别与变迁（v2.0：需连续 3 年指向同一新形态且分数有优势，避免闪变）
   const cls = classifySociety(w);
   if (cls.form !== w.civ.form) {
-    const story = transitionStory(w, w.civ.form, cls.form, cls);
-    w.civ.prevForm = w.civ.form;
-    w.civ.form = cls.form;
-    w.civ.formSince = w.year;
-    report.formChanged = true;
-    report.events.push({
-      id: `ev-${w.nextEventId++}`,
-      year: w.year,
-      title: story.title,
-      category: 'institution',
-      text: story.text,
-      causes: cls.causes,
-      effects: [`社会形态 → ${cls.form === 'collapsed' ? '文明废墟' : formName(cls.form)}`, ...subsequentEffects(w)],
-      intervened: false,
-      severity: 0.9,
-    });
+    const st = formHysteresis.get(w) ?? { form: cls.form, count: 0 };
+    if (st.form === cls.form) st.count++;
+    else { st.form = cls.form; st.count = 1; }
+    formHysteresis.set(w, st);
+    const margin = cls.scores[cls.form] - cls.scores[w.civ.form];
+    if (st.count >= 5 && (margin > 0.2 || w.civ.form === 'primitive')) {
+      const story = transitionStory(w, w.civ.form, cls.form, cls);
+      w.civ.prevForm = w.civ.form;
+      w.civ.form = cls.form;
+      w.civ.formSince = w.year;
+      report.formChanged = true;
+      report.events.push({
+        id: `ev-${w.nextEventId++}`,
+        year: w.year,
+        title: story.title,
+        category: 'institution',
+        text: story.text,
+        causes: cls.causes,
+        effects: [`社会形态 → ${cls.form === 'collapsed' ? '文明废墟' : formName(cls.form)}`, ...subsequentEffects(w)],
+        intervened: false,
+        severity: 0.9,
+      });
+      formHysteresis.delete(w);
+    }
+  } else {
+    formHysteresis.delete(w);
   }
 
   // 7. 冲突
@@ -190,19 +220,7 @@ export function tickYear(w: WorldState): TickReport {
   }
 
   // 8. 事件
-  const ctx = freshCtx(w, levelUps, stageUps.filter(x => x >= 0).map(x => x));
-  // 建造完成时的跃迁已即时记录；此处补充人口降级提示
-  for (const neg of stageUps.filter(x => x < 0)) {
-    const s = w.settlements.find(x => x.id === -neg - 1000);
-    if (s && !s.dead) {
-      report.events.push({
-        id: `ev-${w.nextEventId++}`, year: w.year, title: `${s.name}的衰退`,
-        category: 'urban', text: `${s.name}因人口流失而萎缩为${stageName(s.stage)}。`,
-        causes: [`人口降至 ${s.population}`], effects: [`聚落等级 → ${stageName(s.stage)}`],
-        intervened: false, severity: 0.4, settlementId: s.id,
-      });
-    }
-  }
+  const ctx = freshCtx(w, levelUps, stageUps);
   report.events.push(...dispatchEvents(w, ctx));
 
   // 9. 编年史
@@ -267,7 +285,10 @@ function formName(f: string): string {
   return ({ primitive: '原始社会', slave: '奴隶制社会', feudal: '封建社会', capitalist: '资本主义社会', socialist: '社会主义社会', collapsed: '文明废墟' } as Record<string, string>)[f] ?? f;
 }
 function stageName(s: string): string {
-  return ({ camp: '营地', hamlet: '小村', village: '村庄', town: '城镇', city: '城市' } as Record<string, string>)[s] ?? s;
+  return ({ camp: '营地', hamlet: '村落', village: '村庄', town: '城镇', city: '城市' } as Record<string, string>)[s] ?? s;
+}
+function stageRank(s: string): number {
+  return ({ camp: 0, hamlet: 1, village: 2, town: 3, city: 4 } as Record<string, number>)[s] ?? 0;
 }
 function subsequentEffects(w: WorldState): string[] {
   const v = w.civ.vars;
@@ -275,17 +296,6 @@ function subsequentEffects(w: WorldState): string[] {
     `所有制：共有${Math.round(v.ownCommon * 100)}% / 私有${Math.round(v.ownPrivate * 100)}% / 公有${Math.round(v.ownPublic * 100)}%`,
     `劳动关系：强制${Math.round(v.laborForced * 100)}% / 依附${Math.round(v.laborBonded * 100)}% / 雇佣${Math.round(v.laborWage * 100)}% / 合作${Math.round(v.laborCoop * 100)}%`,
   ];
-}
-
-function checkStageDowngrade(s: WorldState['settlements'][number], _was: string): boolean {
-  const thresholds: [string, number][] = [['camp', 0], ['hamlet', 55], ['village', 130], ['town', 320], ['city', 700]];
-  let target = 'camp';
-  for (const [st, pop] of thresholds) if (s.population >= pop) target = st;
-  if (target !== s.stage) {
-    s.stage = target as typeof s.stage;
-    return true;
-  }
-  return false;
 }
 
 /** 派生统计（UI 共用） */
