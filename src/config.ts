@@ -12,9 +12,27 @@ import { BuildingKind } from './types';
  */
 
 export const CFG = {
-  /** 模拟节奏（v2.0 放慢：一年约 2.2 秒，让演化被看清） */
-  yearMs1x: 2200,
-  speeds: [0, 1, 2, 4, 8] as const,
+  /** 模拟节奏（v3.0 大幅放缓：一年约 6 秒，让生老病死与历史进程被看清） */
+  yearMs1x: 6000,
+  speeds: [0, 1, 2, 4, 8, 16] as const,
+  /** 视觉昼夜循环长度（秒，现实时间推进，与日历年解耦；暂停时停走） */
+  daySeconds: 26,
+
+  /** v3.0 居民智能体（画面上的真实小人） */
+  agents: {
+    /** 每聚落可见小人上限（人口多于此后按比例象征性呈现） */
+    perSettlementCap: 110,
+    /** 全局上限（性能保护） */
+    globalCap: 640,
+    /** 成年/老年阈值（岁） */
+    adultAge: 16,
+    elderAge: 58,
+    /** 自然寿限区间（岁，医道技术延长上限） */
+    lifespanMin: 52,
+    lifespanMax: 74,
+    /** 坟墓等印记上限 */
+    decalsMax: 260,
+  },
 
   /** 人口（v2.0：净增速率控制在顺境 ~1%/年前现代水平） */
   birthBase: 0.028,
@@ -66,7 +84,7 @@ export const CFG = {
 
   /** 存档 */
   saveKey: 'society-lab-save-v2',
-  saveVersion: 2,
+  saveVersion: 3,
 } as const;
 
 /**

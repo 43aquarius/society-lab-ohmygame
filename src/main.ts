@@ -11,7 +11,8 @@ import { macroEconomy } from './sim/economy';
 import { castBrushPower, castCivPower, castPurify, powerChronicleEntry, GOD_POWERS, canAfford } from './powers';
 import { classifySociety, formLabel } from './sim/society';
 import { VisualWorld } from './render/world';
-import { gridToScreen } from './render/iso';
+import { gridToScreen, screenToGrid } from './render/iso';
+import { agentName, jobName } from './render/agents';
 import { AudioManager } from './audio';
 import { icon } from './ui/icons';
 import {
@@ -24,6 +25,15 @@ import {
 } from './ui/panels';
 import { WORLD_TITLES } from './names';
 import { autosave, loadAutosave, serialize as serializeSave, deserialize as deserializeSave } from './saves';
+
+// 屏幕像素 → 浮点网格坐标（供居民检视）
+function screenToGridFloat(vw: VisualWorld, px: number, py: number): { x: number; y: number } | null {
+  const rect = vw.canvas.getBoundingClientRect();
+  const cx = rect.width / 2, cy = rect.height / 2;
+  const wx = (px - rect.left - cx) / vw.camera.zoom + vw.camera.x;
+  const wy = (py - rect.top - cy) / vw.camera.zoom + vw.camera.y;
+  return screenToGrid(wx, wy + 16);
+}
 
 class Game {
   app = document.getElementById('app')!;
@@ -261,6 +271,8 @@ class Game {
     this.vw.minimap = document.createElement('canvas');
     this.vw.minimap.width = this.vw.minimap.height = w.config.size;
     this.vw.terrainCache.dirty = true;
+    // v3.0：开局即有居民（不等第一个模拟年）
+    this.vw.agents.syncYear(w);
     (window as any).__fitViewport?.();
     this.vw.fitMap(w.config.size);
     this.bindCanvasInput(canvas);
@@ -528,7 +540,27 @@ class Game {
       }
       return;
     }
-    // 检视模式：找最近聚落
+    // 检视模式：先看是否点中了居民（真实的人，可查看其生平）
+    const g = screenToGridFloat(this.vw, px, py);
+    if (g) {
+      const agent = this.vw.agents.pick(g.x, g.y);
+      if (agent) {
+        const s = this.world.settlements.find(x => x.id === agent.sid);
+        const stage = agent.age < CFG.agents.adultAge ? '孩童'
+          : agent.age >= CFG.agents.elderAge ? '长者' : '成年';
+        const health = agent.sick > 0.3 ? '⚠ 正在患病' : '健康';
+        const doing = agent.state === 'work' ? '正在劳作'
+          : agent.state === 'sleep' ? '已入睡'
+            : agent.state === 'goto' ? '在路上'
+              : agent.state === 'social' || agent.state === 'idle' ? '歇息/交谈'
+                : agent.state === 'migrate' ? '迁往新居' : '待在' + (s?.name ?? '');
+        toast(`${agentName(agent.id)} · ${agent.gender ? '女' : '男'} · ${agent.age} 岁（${stage}） · ${jobName(agent.job, agent.age)} · ${health} · ${doing}`, 'neutral', 'people');
+        this.vw.addPing(Math.round(agent.gx), Math.round(agent.gy), 'rgba(242,234,214,0.95)');
+        this.audio.click();
+        return;
+      }
+    }
+    // 找最近聚落
     let best: Settlement | null = null, bestD = 2.4;
     for (const s of this.world.settlements) {
       const d = Math.hypot(s.x - tile.x, s.y - tile.y);
@@ -566,6 +598,7 @@ class Game {
         case '2': this.speed = 2; setHudSpeed(this.els.topbar, 2); break;
         case '3': this.speed = 4; setHudSpeed(this.els.topbar, 4); break;
         case '4': this.speed = 8; setHudSpeed(this.els.topbar, 8); break;
+        case '5': this.speed = 16; setHudSpeed(this.els.topbar, 16); break;
         case 'Tab':
           e.preventDefault();
           {
@@ -639,6 +672,9 @@ class Game {
     const w = this.world;
     this.refreshHud();
 
+    // v3.0：居民智能体随年度同步（生老病死/迁徙/职业/时疫）
+    this.vw?.agents.syncYear(w);
+
     // 事件提示 + 视觉特效
     for (const ev of report.events) {
       if (ev.category === 'institution') {
@@ -684,8 +720,9 @@ class Game {
   }
 }
 
-// ---------- OhMyGame 玩法测试桥（开发模式） ----------
-if ((import.meta as any).env?.DEV) {
+// ---------- OhMyGame 玩法测试桥 ----------
+// v3.0：构建版也暴露（上帝沙盒的调试/自动化接口，无破坏性）
+{
   (window as any).__OHMYGAME_PLAYTEST__ = {
     snapshot: () => {
       const g = (window as any).__game as Game | undefined;
@@ -727,6 +764,8 @@ if ((import.meta as any).env?.DEV) {
       const reports = [];
       for (let i = 0; i < Math.max(0, Math.floor(years)); i++) {
         reports.push(tickYear(g.world));
+        // v3.0：居民智能体与年度同步（生老病死随 step 推进）
+        g.vw?.agents.syncYear(g.world);
       }
       g.refreshHud();
       return { years: reports.length, events: reports.reduce((a, r) => a + r.events.length, 0) };

@@ -81,6 +81,7 @@ export function newWorld(config: {
     nextBuildingId: 1,
     nextEventId: 1,
     snapshots: [],
+    decals: [],
   };
 
   // 初始聚落

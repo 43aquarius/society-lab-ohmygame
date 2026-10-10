@@ -42,7 +42,7 @@ export interface GenResult {
 
 /** 计算可通行/可建设性（渲染与寻路提示用） */
 export function buildable(t: Tile): boolean {
-  return t.terrain !== Terrain.Water && t.terrain !== Terrain.Mountain && t.elevation <= 2;
+  return t.terrain !== Terrain.Water && t.terrain !== Terrain.Mountain && t.elevation <= 3;
 }
 
 export function generateWorld(config: GameConfig): GenResult {
@@ -63,7 +63,9 @@ export function generateWorld(config: GameConfig): GenResult {
   for (let j = 0; j < size; j++) {
     for (let i = 0; i < size; i++) {
       const idx = j * size + i;
-      let e = elevNoise(i, j, 5, scenario === 'valley' ? 0.09 : 0.11);
+      // v3.0：叠加山脊噪声，让地势有走向（山脉成列而非斑点）
+      const ridge = 1 - Math.abs(elevNoise(i + 533, j - 721, 3, 0.05) - 0.5) * 2; // 0..1，脊线处接近 1
+      let e = elevNoise(i, j, 5, scenario === 'valley' ? 0.09 : 0.11) * 0.78 + ridge * ridge * 0.22;
       // 边缘抬升形成盆地感（世界像一块沙盘）
       e = e * 0.86 + 0.14 * (1 - edgeFade(i, j) * 0.85);
       if (scenario === 'valley') {
@@ -84,10 +86,38 @@ export function generateWorld(config: GameConfig): GenResult {
     }
   }
 
-  // 高度分位阈值：水域 ~14%，山地 ~12%，丘陵 ~16%
+  // v3.0：分位数阶梯海拔（0..6 级）—— 平原广袤、丘陵连绵、山地高耸，
+  // 再做高原半滑（去掉孤峰/孤坑，让相邻格大多只差 1 级，悬崖只出现在真正的山麓）
   const sorted = Float32Array.from(elevationField).sort();
   const q = (p: number) => sorted[Math.min(sorted.length - 1, Math.floor(p * sorted.length))];
-  const waterT = q(0.14), hillT = q(0.72), mountainT = q(0.9);
+  const waterT = q(0.14);
+  const lvT = [q(0.18), q(0.40), q(0.60), q(0.78), q(0.88), q(0.95)];
+  const elevLv = new Uint8Array(size * size);
+  for (let idx = 0; idx < tiles.length; idx++) {
+    const e = elevationField[idx];
+    let lv = 6;
+    for (let l = 0; l < 6; l++) {
+      if (e < lvT[l]) { lv = l; break; }
+    }
+    elevLv[idx] = lv;
+  }
+  const lvAt = (i: number, j: number) =>
+    (i < 0 || j < 0 || i >= size || j >= size) ? 0 : elevLv[j * size + i];
+  for (let pass = 0; pass < 3; pass++) {
+    const next = Uint8Array.from(elevLv);
+    for (let j = 0; j < size; j++) {
+      for (let i = 0; i < size; i++) {
+        const l = elevLv[j * size + i];
+        const ns = [lvAt(i + 1, j), lvAt(i - 1, j), lvAt(i, j + 1), lvAt(i, j - 1)];
+        const maxN = Math.max(...ns), minN = Math.min(...ns);
+        // 削峰：比所有邻格都高 2 级以上 → 只保留高 1 级
+        if (l > maxN + 1) next[j * size + i] = maxN + 1;
+        // 填坑：比所有邻格都低 2 级以上 → 壁到只低 1 级
+        else if (l < minN - 1) next[j * size + i] = minN - 1;
+      }
+    }
+    elevLv.set(next);
+  }
 
   for (let idx = 0; idx < tiles.length; idx++) {
     const e = elevationField[idx];
@@ -95,19 +125,17 @@ export function generateWorld(config: GameConfig): GenResult {
     if (e < waterT) {
       t.terrain = Terrain.Water;
       t.elevation = 0;
-    } else if (e >= mountainT) {
-      t.terrain = Terrain.Mountain;
-      t.elevation = 4;
-    } else if (e >= hillT) {
-      t.terrain = Terrain.Hills;
-      t.elevation = e > (hillT + mountainT) / 2 ? 3 : 2;
     } else {
-      t.elevation = 1;
-      t.terrain = Terrain.Grass;
+      const lv = elevLv[idx];
+      t.elevation = lv;
+      if (lv >= 5) t.terrain = Terrain.Mountain;
+      else if (lv >= 3) t.terrain = Terrain.Hills;
+      else t.terrain = Terrain.Grass;
     }
   }
 
   // 河流：自山地向低处行走（带惯性），直到入湖/入水/出界
+  // v3.0：河流同时下切海拔 —— 山间河谷真实地下降
   const riverCount = size >= 48 ? 4 : 3;
   for (let r = 0; r < riverCount; r++) {
     let tries = 0;
@@ -125,6 +153,16 @@ export function generateWorld(config: GameConfig): GenResult {
       const idx = y * size + x;
       if (tiles[idx].terrain === Terrain.Water && steps > 2) break;
       if (tiles[idx].terrain !== Terrain.Mountain) tiles[idx].terrain = Terrain.Water;
+      // 河床下切：不高于四周最低岸，逐级下降
+      const bed = Math.max(0, Math.min(
+        tiles[idx].elevation,
+        elevLv[idx] - 1,
+        ...[[1, 0], [-1, 0], [0, 1], [0, -1]].map(([dx, dy]) => {
+          const nx = x + dx, ny = y + dy;
+          return (nx < 0 || ny < 0 || nx >= size || ny >= size) ? 6 : tiles[ny * size + nx].elevation;
+        }),
+      ));
+      tiles[idx].elevation = bed;
       // 朝低处走，带惯性
       let best = -Infinity, bx = x, by = y;
       for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
@@ -201,7 +239,7 @@ export function generateWorld(config: GameConfig): GenResult {
     for (let i = 0; i < size; i++) {
       const idx = j * size + i;
       if (tiles[idx].terrain === Terrain.Grass || tiles[idx].terrain === Terrain.Hills) {
-        if (rockNoise(i, j, 2, 0.18) > 0.72 && elevationField[idx] > hillT * 0.92) {
+        if (rockNoise(i, j, 2, 0.18) > 0.72 && elevationField[idx] > q(0.55)) {
           tiles[idx].terrain = Terrain.Rock;
         }
       }
@@ -216,6 +254,7 @@ export function generateWorld(config: GameConfig): GenResult {
     const i = 2 + rng.int(size - 4), j = 2 + rng.int(size - 4);
     const t = tiles[j * size + i];
     if (t.terrain !== Terrain.Grass && t.terrain !== Terrain.Fertile) continue;
+    if (t.elevation > 2) continue;
     if (!nearWater(i, j, 4)) continue;
     // 距既有起点足够远
     let ok = true;

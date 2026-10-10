@@ -58,6 +58,7 @@ export function buildHud(root: HTMLElement, cbs: HudCallbacks, topbarHost?: HTML
       <button data-speed="2" title="快速 (2)">${icon('ff', 15)}</button>
       <button data-speed="4" title="极速 (3)">${icon('fff', 15)}</button>
       <button data-speed="8" title="超极速 (4)">${icon('fff', 13)}<span style="font-size:9px;font-weight:700">8×</span></button>
+      <button data-speed="16" title="岁月如梭 (5)">${icon('fff', 12)}<span style="font-size:9px;font-weight:700">16×</span></button>
       <button id="step-btn" title="单步推进一年（暂停时可用）">${icon('step', 16)}</button>
     </div>
     <button class="icon-btn" id="btn-home" title="全景视角 · 缩放到整张地图 (H)">${icon('home', 18)}</button>
