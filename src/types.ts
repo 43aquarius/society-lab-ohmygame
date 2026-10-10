@@ -45,6 +45,9 @@ export enum Terrain {
   Hills = 4,
   Mountain = 5,
   Rock = 6,
+  // v4.0 气候带：沙漠与苔原，让世界如真实地表般多样
+  Sand = 7,
+  Tundra = 8,
 }
 
 export const TERRAIN_NAMES: Record<Terrain, string> = {
@@ -55,6 +58,8 @@ export const TERRAIN_NAMES: Record<Terrain, string> = {
   [Terrain.Hills]: '丘陵',
   [Terrain.Mountain]: '山地',
   [Terrain.Rock]: '石地',
+  [Terrain.Sand]: '沙漠',
+  [Terrain.Tundra]: '苔原',
 };
 
 export type ResourceKind = 'wood' | 'stone' | 'metal';
@@ -68,10 +73,25 @@ export interface Tile {
   moisture: number;
   /** 海拔层级 0..6（v3.0：更丰富的起伏，悬崖渲染用） */
   elevation: number;
+  /** v4.0 气候：温度 0..1（决定植被形态与渲染风格，苔原/沙漠/丛林） */
+  temp: number;
   /** 是否含矿脉（丘陵/山地/石地） */
   ore: boolean;
   /** 归属聚落 id（领地圈定），-1 为无主 */
   owner: number;
+}
+
+/** v4.0 分块：世界按 CHUNK×CHUNK 的块按需生成（类 Minecraft 流式加载） */
+export const CHUNK = 32;
+
+export interface WorldChunk {
+  cx: number;
+  cy: number;
+  tiles: Tile[];
+  /** 被神力/事件修改过的块会随存档保存，且永不从缓存中淘汰 */
+  modified: boolean;
+  /** LRU 计时 */
+  lastTouch: number;
 }
 
 export enum BuildingKind {
@@ -150,6 +170,8 @@ export interface Settlement {
   name: string;
   x: number;
   y: number;
+  /** v4.0：所属文明（每个文明有自己的社会形态） */
+  civId: number;
   stage: SettlementStage;
   population: number;
   buildings: Building[];
@@ -169,6 +191,8 @@ export interface Settlement {
   dead: boolean;
   /** 最近一次饥荒年份 */
   lastFamine: number;
+  /** v4.0 道路：聚落内的土路格子（y*size+x，含中心广场），建筑沿路分布 */
+  roads: Set<number>;
 }
 
 export enum TechDomain {
@@ -209,6 +233,40 @@ export const FORM_NAMES: Record<SocietyForm, string> = {
   socialist: '社会主义社会',
   collapsed: '文明废墟',
 };
+
+/**
+ * v4.0 文明：世界的基本单位。每个文明拥有自己的生产关系、技术、
+ * 阶级结构与上层建筑——社会形态按马克思主义历史唯物主义标准
+ * （生产资料所有制为核心，辅以阶级关系、分配关系、上层建筑）独立判定，
+ * 不同文明可以同时处于不同的社会形态。
+ */
+export interface Civilization {
+  id: number;
+  name: string;
+  /** 文明色（领土/小地图/标签/编年史着色） */
+  color: string;
+  /** 文化风格（建筑配色与形制差异） */
+  culture: number;
+  form: SocietyForm;
+  formSince: number;
+  prevForm: SocietyForm | null;
+  vars: SocietyVars;
+  tech: TechState;
+  groups: SocialGroup[];
+  /** 战争俘虏等冲击的记忆（衰减） */
+  warMemory: number;
+  /** 启蒙思潮强度 0..1（神力可提升，影响组织与改革） */
+  enlightenment: number;
+  /** 已接触的文明 id（接触后才发生贸易与技术扩散） */
+  met: number[];
+  dead: boolean;
+  founded: number;
+  /** 本文明的观察者曲线采样 */
+  history: HistorySample[];
+  /** 形态判定回滞（运行时，不序列化） */
+  hystForm?: SocietyForm;
+  hystCount?: number;
+}
 
 /** 宏观社会变量（文明级），即提示词 §6.2 的落地。 */
 export interface SocietyVars {
@@ -290,6 +348,8 @@ export interface EventRecord {
   /** 玩家是否介入 */
   intervened: boolean;
   settlementId?: number;
+  /** v4.0：所属文明（多文明各自的编年史） */
+  civId?: number;
   severity: number;
   /** v3.0：视觉表现挂接（交战双方、坐标等，不改模拟语义） */
   aux?: { attackerId?: number; defenderId?: number; x?: number; y?: number; radius?: number };
@@ -333,9 +393,10 @@ export type PlayMode = 'free' | 'limited';
 
 export interface GameConfig {
   seed: number;
+  /** 世界边长（格）。v4.0：分块流式生成，256/512/1024 的巨大世界 */
   size: number;
   mode: PlayMode;
-  /** 初始定居数 */
+  /** 初始文明数（每个文明一个起始聚落，各自独立演化） */
   settlements: number;
   scenario: 'dawn' | 'valley';
 }
@@ -352,25 +413,15 @@ export interface HistorySample {
 export interface WorldState {
   config: GameConfig;
   year: number;
-  tiles: Tile[];
-  weather: WeatherCell[];
+  /** v4.0 分块地形：按需生成、LRU 缓存；modified 的块随存档保存 */
+  chunks: Map<number, WorldChunk>;
+  /** 稀疏天气（仅被神力干预过的格子；key = y*size+x） */
+  weather: Map<number, WeatherCell>;
   settlements: Settlement[];
-  civ: {
-    form: SocietyForm;
-    formSince: number;
-    prevForm: SocietyForm | null;
-    vars: SocietyVars;
-    tech: TechState;
-    groups: SocialGroup[];
-    /** 战争俘虏等冲击的记忆（衰减） */
-    warMemory: number;
-    /** 启蒙思潮强度 0..1（神力可提升，影响组织与改革） */
-    enlightenment: number;
-  };
+  /** v4.0 多文明：每个文明独立的社会形态与历史进程 */
+  civs: Civilization[];
   chronicle: ChronicleEntry[];
   activeEvents: ActiveEvent[];
-  /** 观察者曲线采样 */
-  history: HistorySample[];
   /** 神力使用记录（编年史视角） */
   interventions: number;
   /** 神力能量（有限模式） */
@@ -383,4 +434,10 @@ export interface WorldState {
   snapshots: { year: number; label: string; data: string }[];
   /** v3.0：持久沙盘印记（坟墓/陨坑/焦痕/废墟），上限控制内存 */
   decals: Decal[];
+  /** 世界生成上下文（噪声与阈值；重建自 seed，不序列化） */
+  gen: import('./worldgen').GenContext;
+  /** 当前镜头聚焦/观察的文明 id */
+  observedCiv: number;
+  /** 运行时缓存：文明按 id 索引（id === 数组下标） */
+  civIndex: Map<number, Civilization>;
 }

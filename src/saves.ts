@@ -1,16 +1,26 @@
 /**
- * SaveManager — 存档、读档与世界分支
- * 版本化 JSON；localStorage 槽位 + 文件导出/导入；
- * 快照支持「从历史节点创建分支」。随机数状态一并保存保证可复现。
+ * SaveManager v4.0 — 存档、读档与世界分支（多文明 + 分块地形）
+ * - 地形只保存被修改过的 chunk（神力干预），其余由种子确定性重建——
+ *   超大世界的存档依然很小；
+ * - 兼容 v3 旧档：全量 tiles 数组迁移为显式 chunk（modified=true）；
+ * - 多文明：civs 数组 + 聚落 civId + 道路 + 稀疏天气。
  */
 import { CFG } from './config';
-import { Rng, Terrain, type WorldState, type Tile } from './types';
+import { Rng, Terrain, CHUNK, type WorldState, type Tile, type WorldChunk, type WeatherCell } from './types';
+import { createGen, chunkKey, generateChunk } from './worldgen';
 
 interface SavePayload {
   version: number;
   savedAt: number;
   worldName: string;
   world: Serialized;
+}
+
+interface ChunkSave {
+  cx: number;
+  cy: number;
+  /** 打包：terrain|elev|ore|owner 每格 4 字符位（16 进制），fert/moist/temp 量化 0..200 */
+  pack: string;
 }
 
 interface Serialized {
@@ -23,35 +33,68 @@ interface Serialized {
   divine: number;
   divineMax: number;
   size: number;
-  // 地形压缩为分量数组
-  tTerrain: number[];
-  tFert: number[];
-  tMoist: number[];
-  tElev: number[];
-  tOre: number[];
-  tOwner: number[];
-  weather: { wet: number; years: number }[];
-  settlements: WorldState['settlements'];
-  civ: WorldState['civ'];
+  observedCiv: number;
+  /** v4.0：被修改过的分块（确定性部分不保存） */
+  chunks: ChunkSave[];
+  /** v4.0：文明数组 */
+  civs: WorldState['civs'];
+  /** 稀疏天气（只有被干预过的格子） */
+  weather: { k: number; wet: number; years: number }[];
+  settlements: (Omit<WorldState['settlements'][number], 'roads'> & { roads: number[] })[];
   chronicle: WorldState['chronicle'];
   activeEvents: WorldState['activeEvents'];
-  history: WorldState['history'];
-  snapshots: WorldState['snapshots'];
-  /** v3.0：持久沙盘印记 */
   decals: WorldState['decals'];
+  snapshots: WorldState['snapshots'];
+}
+
+/** 打包一个 chunk（hex 编码：地形/海拔/矿 3 字符 + 肥力/湿度/温度各 2 hex 字符） */
+function packChunk(ch: WorldChunk): ChunkSave {
+  let geo = '';
+  const N = CHUNK * CHUNK;
+  for (let i = 0; i < N; i++) {
+    const t = ch.tiles[i];
+    geo += t.terrain.toString(16)
+      + Math.min(15, t.elevation).toString(16)
+      + (t.ore ? '1' : '0');
+  }
+  // 环境：肥力/湿度/温度各量化到 0..200，2 位 hex（避免任何分隔符冲突）
+  let env = '';
+  for (let i = 0; i < N; i++) {
+    const t = ch.tiles[i];
+    env += Math.round(Math.min(1, Math.max(0, t.fertility)) * 200).toString(16).padStart(2, '0')
+      + Math.round(Math.min(1, Math.max(0, t.moisture)) * 200).toString(16).padStart(2, '0')
+      + Math.round(Math.min(1, Math.max(0, t.temp)) * 200).toString(16).padStart(2, '0');
+  }
+  return { cx: ch.cx, cy: ch.cy, pack: geo + '|' + env };
+}
+
+function unpackChunk(save: ChunkSave, size: number): WorldChunk {
+  const [geo, env] = save.pack.split('|');
+  const tiles: Tile[] = new Array(CHUNK * CHUNK);
+  for (let i = 0; i < CHUNK * CHUNK; i++) {
+    const g = i * 3;
+    const e = i * 6;
+    tiles[i] = {
+      terrain: parseInt(geo[g], 16) as Terrain,
+      elevation: parseInt(geo[g + 1], 16),
+      ore: geo[g + 2] === '1',
+      fertility: parseInt(env.slice(e, e + 2), 16) / 200,
+      moisture: parseInt(env.slice(e + 2, e + 4), 16) / 200,
+      temp: parseInt(env.slice(e + 4, e + 6), 16) / 200,
+      owner: -1,
+    };
+  }
+  return { cx: save.cx, cy: save.cy, tiles, modified: true, lastTouch: 0 };
 }
 
 export function serialize(w: WorldState, worldName: string): string {
-  const size = w.config.size;
-  const tTerrain: number[] = [], tFert: number[] = [], tMoist: number[] = [],
-    tElev: number[] = [], tOre: number[] = [], tOwner: number[] = [];
-  for (const t of w.tiles) {
-    tTerrain.push(t.terrain);
-    tFert.push(Math.round(t.fertility * 200));
-    tMoist.push(Math.round(t.moisture * 200));
-    tElev.push(t.elevation);
-    tOre.push(t.ore ? 1 : 0);
-    tOwner.push(t.owner + 1); // -1 → 0
+  const chunks: ChunkSave[] = [];
+  for (const ch of w.chunks.values()) {
+    if (ch.modified) chunks.push(packChunk(ch));
+  }
+  const weather: { k: number; wet: number; years: number }[] = [];
+  for (const [k, c] of w.weather) {
+    if (c.wet !== 0) weather.push({ k, wet: Math.round(c.wet * 50) / 50, years: c.years });
   }
   const payload: SavePayload = {
     version: CFG.saveVersion,
@@ -66,16 +109,20 @@ export function serialize(w: WorldState, worldName: string): string {
       interventions: w.interventions,
       divine: w.divine,
       divineMax: w.divineMax,
-      size,
-      tTerrain, tFert, tMoist, tElev, tOre, tOwner,
-      weather: w.weather.map(c => ({ wet: Math.round(c.wet * 50) / 50, years: c.years })),
-      settlements: w.settlements,
-      civ: w.civ,
-      chronicle: w.chronicle.slice(-500),
+      size: w.gen.size,
+      observedCiv: w.observedCiv,
+      chunks,
+      civs: w.civs.map(c => ({
+        ...c,
+        history: c.history.slice(-200),
+        // 运行时字段不存
+        hystForm: undefined, hystCount: undefined,
+      })),
+      weather,
+      settlements: w.settlements.map(s => ({ ...s, roads: [...s.roads].slice(-900) })),
+      chronicle: w.chronicle.slice(-600),
       activeEvents: w.activeEvents,
-      history: w.history,
       decals: w.decals.slice(-CFG.agents.decalsMax),
-      // 控制存档体积：仅保留带数据的最近 8 个快照
       snapshots: (() => {
         const withData = w.snapshots.filter(s => s.data).slice(-8);
         const marks = w.snapshots.filter(s => !s.data).slice(-30);
@@ -93,34 +140,40 @@ export function deserialize(json: string): { world: WorldState; worldName: strin
   } catch {
     return { error: '存档文件不是有效的 JSON' };
   }
-  if (!payload || payload.version !== CFG.saveVersion || !payload.world) {
-    return { error: `存档版本不兼容（当前支持 v${CFG.saveVersion}）` };
+  if (!payload || !payload.world) {
+    return { error: '存档文件损坏' };
   }
+  // v4 新格式
+  if (payload.version === 4) {
+    return deserializeV4(payload);
+  }
+  // v3 旧档迁移
+  if (payload.version === 3) {
+    return migrateV3(payload as any);
+  }
+  return { error: `存档版本不兼容（当前支持 v3/v4）` };
+}
+
+function deserializeV4(payload: SavePayload): { world: WorldState; worldName: string } | { error: string } {
   const s = payload.world;
-  const size = s.size;
-  const tiles: Tile[] = new Array(size * size);
-  for (let i = 0; i < tiles.length; i++) {
-    tiles[i] = {
-      terrain: s.tTerrain[i] as Terrain,
-      fertility: s.tFert[i] / 200,
-      moisture: s.tMoist[i] / 200,
-      elevation: s.tElev[i],
-      ore: s.tOre[i] === 1,
-      owner: s.tOwner[i] - 1,
-    };
+  const gen = createGen(s.config.seed, s.size);
+  const chunks = new Map<number, WorldChunk>();
+  for (const cs of s.chunks) {
+    chunks.set(chunkKey(gen, cs.cx, cs.cy), unpackChunk(cs, s.size));
   }
   const rng = new Rng(1);
   rng.state = s.rngState;
+  const weather = new Map<number, WeatherCell>();
+  for (const c of s.weather) weather.set(c.k, { wet: c.wet, years: c.years });
   const world: WorldState = {
     config: s.config,
     year: s.year,
-    tiles,
-    weather: s.weather.map(c => ({ wet: c.wet, years: c.years })),
-    settlements: s.settlements,
-    civ: s.civ,
+    chunks,
+    weather,
+    settlements: s.settlements.map(x => ({ ...x, roads: new Set<number>(x.roads ?? []) })),
+    civs: s.civs.map(c => ({ ...c, met: c.met ?? [], history: c.history ?? [] })),
     chronicle: s.chronicle,
     activeEvents: s.activeEvents,
-    history: s.history,
     decals: s.decals ?? [],
     interventions: s.interventions,
     divine: s.divine,
@@ -129,8 +182,93 @@ export function deserialize(json: string): { world: WorldState; worldName: strin
     nextBuildingId: s.nextBuildingId,
     nextEventId: s.nextEventId,
     snapshots: s.snapshots,
+    gen,
+    observedCiv: s.observedCiv ?? 0,
+    civIndex: new Map(),
   };
   return { world, worldName: payload.worldName };
+}
+
+/** v3 → v4 迁移：全量 tiles → 显式 chunks（modified=true 永不淘汰） */
+function migrateV3(payload: any): { world: WorldState; worldName: string } | { error: string } {
+  const s = payload.world;
+  const size: number = s.size;
+  const gen = createGen(s.config.seed, size);
+  const chunks = new Map<number, WorldChunk>();
+  const perRow = Math.ceil(size / CHUNK);
+  for (let cy = 0; cy < perRow; cy++) {
+    for (let cx = 0; cx < perRow; cx++) {
+      const ch = generateChunk(gen, cx, cy);
+      ch.modified = true; // 迁移块显式保存，防止淘汰后丢失旧世界数据
+      // 覆盖为旧数据
+      for (let ly = 0; ly < CHUNK; ly++) {
+        for (let lx = 0; lx < CHUNK; lx++) {
+          const x = cx * CHUNK + lx, y = cy * CHUNK + ly;
+          if (x >= size || y >= size) continue;
+          const i = y * size + x;
+          const old = {
+            terrain: s.tTerrain[i] as Terrain,
+            fertility: s.tFert[i] / 200,
+            moisture: s.tMoist[i] / 200,
+            elevation: s.tElev[i],
+            temp: ch.tiles[ly * CHUNK + lx].temp, // 旧档无温度：用气候场推
+            ore: s.tOre[i] === 1,
+            owner: s.tOwner[i] - 1,
+          };
+          ch.tiles[ly * CHUNK + lx] = old;
+        }
+      }
+      chunks.set(chunkKey(gen, cx, cy), ch);
+    }
+  }
+  // 旧单文明 → v4 文明数组
+  const oldCiv = s.civ;
+  const civs: WorldState['civs'] = [{
+    id: 0,
+    name: '旧世界文明',
+    color: '#4fb38a',
+    culture: 0,
+    form: oldCiv.form ?? 'primitive',
+    formSince: oldCiv.formSince ?? 0,
+    prevForm: oldCiv.prevForm ?? null,
+    vars: oldCiv.vars,
+    tech: oldCiv.tech,
+    groups: oldCiv.groups ?? [
+      { id: 'commoners', name: '平民', ideas: 0.05 },
+      { id: 'elite', name: '精英', ideas: -0.1 },
+      { id: 'middle', name: '工商业者', ideas: 0.1 },
+    ],
+    warMemory: oldCiv.warMemory ?? 0,
+    enlightenment: oldCiv.enlightenment ?? 0,
+    met: [],
+    dead: false,
+    founded: 0,
+    history: s.history ?? [],
+  }];
+  const rng = new Rng(1);
+  rng.state = s.rngState;
+  const world: WorldState = {
+    config: { ...s.config, settlements: 1 },
+    year: s.year,
+    chunks,
+    weather: new Map(),
+    settlements: (s.settlements as any[]).map(x => ({ ...x, civId: 0, roads: new Set<number>([x.y * size + x.x]) })),
+    civs,
+    chronicle: s.chronicle ?? [],
+    activeEvents: s.activeEvents ?? [],
+    decals: s.decals ?? [],
+    interventions: s.interventions ?? 0,
+    divine: s.divine ?? 100,
+    divineMax: s.divineMax ?? 100,
+    rng,
+    nextBuildingId: s.nextBuildingId ?? 1,
+    nextEventId: s.nextEventId ?? 1,
+    snapshots: s.snapshots ?? [],
+    gen,
+    observedCiv: 0,
+    civIndex: new Map(),
+  };
+  return { world, worldName: `${payload.worldName}（迁移）` };
 }
 
 // ---------- localStorage 槽位 ----------
@@ -154,7 +292,8 @@ export function listSlots(): SlotInfo[] {
     if (!raw) continue;
     try {
       const p = JSON.parse(raw) as SavePayload;
-      out.push({ key, index: i, worldName: p.worldName, year: p.world.year, savedAt: p.savedAt, form: p.world.civ.form });
+      const mainCiv = p.world.civs?.[0];
+      out.push({ key, index: i, worldName: p.worldName, year: p.world.year, savedAt: p.savedAt, form: mainCiv?.form ?? 'primitive' });
     } catch { /* 忽略损坏槽位 */ }
   }
   return out;

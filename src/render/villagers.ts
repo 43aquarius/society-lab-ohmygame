@@ -7,6 +7,7 @@
  * - 行走摆臂、劳作弯身、携带行囊
  */
 import { BuildingKind, Terrain, type WorldState, type Settlement } from '../types';
+import { tileAt } from '../worldgen';
 import { gridToScreen, vhash } from './iso';
 
 export interface Villager {
@@ -48,10 +49,10 @@ export function villagerCount(s: Settlement): number {
 }
 
 function walkable(w: WorldState, x: number, y: number): boolean {
-  const size = w.config.size;
+  const size = w.gen.size;
   if (x < 0.5 || y < 0.5 || x >= size - 0.5 || y >= size - 0.5) return false;
-  const t = w.tiles[Math.floor(y) * size + Math.floor(x)];
-  return t.terrain !== Terrain.Water && t.terrain !== Terrain.Mountain;
+  const t = tileAt(w, Math.floor(x), Math.floor(y));
+  return !!t && t.terrain !== Terrain.Water && t.terrain !== Terrain.Mountain;
 }
 
 export function spawnVillagers(w: WorldState, s: Settlement): Villager[] {

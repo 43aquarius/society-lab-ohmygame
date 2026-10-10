@@ -10,6 +10,7 @@
  */
 import { BuildingKind, Terrain, type WorldState, type Settlement, type Building } from '../types';
 import { CFG } from '../config';
+import { tileAt } from '../worldgen';
 import { gridToScreen, elevAt, ELEV_H, vhash } from './iso';
 
 export type AgentJob =
@@ -88,20 +89,27 @@ function agentTarget(pop: number): number {
   return Math.min(CFG.agents.perSettlementCap, Math.round(90 + Math.sqrt(pop - 90) * 5));
 }
 
+/** 智能体系统的文明查找（聚落 id → 文明） */
+function civOfAgent(w: WorldState, sid: number): number {
+  const s = w.settlements.find(x => x.id === sid);
+  return s ? s.civId : 0;
+}
+
 /** 聚落的时代（衣着/行为风格） */
 export function settlementEra(w: WorldState, s: Settlement): number {
   switch (s.stage) {
     case 'camp': return 0;
     case 'hamlet': case 'village': return 1;
     case 'town': return 2;
-    case 'city': return (w.civ.tech.levels.industry ?? 1) >= 3 ? 3 : 2;
+    case 'city': return (w.civs[s.civId].tech.levels.industry ?? 1) >= 3 ? 3 : 2;
   }
 }
 
 function walkableAt(w: WorldState, x: number, y: number, fromElev?: number): boolean {
-  const size = w.config.size;
+  const size = w.gen.size;
   if (x < 0.5 || y < 0.5 || x >= size - 0.5 || y >= size - 0.5) return false;
-  const t = w.tiles[(y | 0) * size + (x | 0)];
+  const t = tileAt(w, x | 0, y | 0);
+  if (!t) return false;
   if (t.terrain === Terrain.Water || t.terrain === Terrain.Mountain) return false;
   // 下坡任意可走（人会下坡）；上坡最多爬 2 级（真正的绝壁拦住人）
   if (fromElev !== undefined && t.elevation > fromElev + 2) return false;
@@ -144,8 +152,8 @@ function pickWork(w: WorldState, s: Settlement, job: AgentJob): { x: number; y: 
         const r = 2 + arnd() * Math.min(9, s.radius + 4);
         const x = s.x + Math.cos(ang) * r, y = s.y + Math.sin(ang) * r;
         if (x < 1 || y < 1 || x >= size - 1 || y >= size - 1) continue;
-        const t = w.tiles[(y | 0) * size + (x | 0)];
-        if (t.terrain === Terrain.Forest) return { x, y };
+        const t = tileAt(w, x | 0, y | 0);
+        if (t && t.terrain === Terrain.Forest) return { x, y };
       }
       return null;
     }
@@ -194,7 +202,7 @@ export class AgentSystem {
     // 年龄 + 自然死亡判定
     for (const a of this.agents) {
       a.age++;
-      const med = w.civ.tech.levels.medicine ?? 1;
+      const med = w.civs[civOfAgent(w, a.sid)]?.tech.levels.medicine ?? 1;
       if (a.age >= a.lifespan + med * 0.8 && a.state !== 'dying') {
         this.startDying(a);
       }
@@ -297,7 +305,7 @@ export class AgentSystem {
   }
 
   private spawnAgent(w: WorldState, s: Settlement, x: number, y: number, age: number): Agent {
-    const med = w.civ.tech.levels.medicine ?? 1;
+    const med = w.civs[s.civId].tech.levels.medicine ?? 1;
     const a: Agent = {
       id: this.nextId++,
       sid: s.id,
@@ -739,8 +747,8 @@ function findGraveyard(w: WorldState, s: Settlement): { x: number; y: number } {
     const x = Math.round(s.x + dx / len * r);
     const y = Math.round(s.y + dy / len * r);
     if (x < 2 || y < 2 || x >= size - 2 || y >= size - 2) continue;
-    const t = w.tiles[y * size + x];
-    if (t.terrain !== Terrain.Water && t.terrain !== Terrain.Mountain && t.elevation <= 2) {
+    const t = tileAt(w, x, y);
+    if (t && t.terrain !== Terrain.Water && t.terrain !== Terrain.Mountain && t.elevation <= 2) {
       return { x, y };
     }
   }

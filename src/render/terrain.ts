@@ -1,12 +1,14 @@
 /**
- * VisualWorld 地形渲染 — 精致微缩沙盘风格（v3.0）
+ * VisualWorld 地形渲染 v4.0 — 分块缓存 + 气候带
  * - 海拔 0..6：悬崖侧壁深度 = 与最低邻格的高差，山体呈阶梯状拔起
- * - 雪线（海拔 ≥5），山麓岩层，河床下切形成的河谷
- * - 高大树木（远大于小人）、风摆、落叶
- * - 静态地形离屏缓存（半分辨率一次成图），远景直接贴图
+ * - 气候带：沙漠（沙丘/仙人掌）、苔原（雪斑/矮灌）、温带森林、
+ *   寒带针叶林（温度驱动树形）、丛林（高温高湿的深绿密林）
+ * - 静态地形按 16×16 渲染块缓存（三档分辨率 + LRU + 每帧构建预算），
+ *   支撑 Minecraft 式超大地图的流式渲染。
  */
-import { Terrain, type Tile, type WorldState } from '../types';
+import { Terrain, type Tile, type WorldState, CHUNK } from '../types';
 import { TILE_W, TILE_H, ELEV_H, vhash } from './iso';
+import { tileAt } from '../worldgen';
 
 export interface Palette {
   grass: string[];
@@ -17,6 +19,8 @@ export interface Palette {
   rock: string[];
   water: string[];
   waterDeep: string;
+  sand: string[];
+  tundra: string[];
   side: string;
   forestTree: string[][];
   snow: string;
@@ -46,11 +50,14 @@ export const PALETTE: Palette = {
   rock: shades([156, 150, 140], 6, 0.07),
   water: shades([84, 156, 196], 5, 0.05),
   waterDeep: 'rgb(52,104,150)',
+  sand: shades([224, 200, 148], 6, 0.06),
+  tundra: shades([176, 186, 176], 6, 0.06),
   side: 'rgb(112,88,64)',
   forestTree: [
     ['rgb(56,102,62)', 'rgb(40,82,52)', 'rgb(76,120,72)'],   // 阔叶
     ['rgb(46,96,66)', 'rgb(32,74,52)', 'rgb(64,110,78)'],    // 松柏
-    ['rgb(84,118,60)', 'rgb(62,94,48)', 'rgb(104,138,76)'],  // 白桦
+    ['rgb(84,118,60)', 'rgb(62,94,48)', 'rgb(104,138,76)'],   // 白桦
+    ['rgb(36,84,54)', 'rgb(26,66,42)', 'rgb(52,98,62)'],      // 丛林（更深更大）
   ],
   snow: 'rgb(244,241,235)',
   border: 'rgba(62,84,60,0.35)',
@@ -66,26 +73,25 @@ export function tileTopColor(t: Tile, x: number, y: number): string {
     case Terrain.Mountain: return PALETTE.mountain[(h * PALETTE.mountain.length) | 0];
     case Terrain.Rock: return PALETTE.rock[(h * PALETTE.rock.length) | 0];
     case Terrain.Water: return PALETTE.water[(h * PALETTE.water.length) | 0];
+    case Terrain.Sand: return PALETTE.sand[(h * PALETTE.sand.length) | 0];
+    case Terrain.Tundra: return PALETTE.tundra[(h * PALETTE.tundra.length) | 0];
     default: return PALETTE.grass[0];
   }
 }
 
 /** 该水格周围陆地数（0..4），决定深浅与岸线 */
 function landNeighbors(w: WorldState, x: number, y: number): number {
-  const size = w.config.size;
   let n = 0;
   for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]] as const) {
-    const nx = x + dx, ny = y + dy;
-    if (nx < 0 || ny < 0 || nx >= size || ny >= size) { n++; continue; }
-    if (w.tiles[ny * size + nx].terrain !== Terrain.Water) n++;
+    const t = tileAt(w, x + dx, y + dy);
+    if (!t || t.terrain !== Terrain.Water) n++;
   }
   return n;
 }
 
 function elevOf(w: WorldState, x: number, y: number): number {
-  const size = w.config.size;
-  if (x < 0 || y < 0 || x >= size || y >= size) return 0;
-  return w.tiles[y * size + x].elevation;
+  const t = tileAt(w, x, y);
+  return t ? t.elevation : 0;
 }
 
 /**
@@ -101,8 +107,10 @@ export function drawTile(
   time: number,
   lod: number,
   animated = true,
+  tile?: Tile,
 ) {
-  const t = w.tiles[y * w.config.size + x];
+  const t = tile ?? tileAt(w, x, y);
+  if (!t) return;
   const hw = TILE_W / 2, hh = TILE_H / 2;
   const elev = t.elevation;
 
@@ -250,7 +258,7 @@ export function drawTile(
       break;
     }
     case Terrain.Grass: {
-      if (lod > 0.8) drawGrassTufts(ctx, x, y, cx, cy);
+      if (lod > 0.8) drawGrassTufts(ctx, x, y, cx, cy, t.temp);
       break;
     }
     case Terrain.Fertile: {
@@ -258,9 +266,9 @@ export function drawTile(
       break;
     }
     case Terrain.Forest: {
-      if (lod > 0.45) drawTrees(ctx, x, y, cx, cy, lod, animated ? time : 0);
+      if (lod > 0.45) drawTrees(ctx, x, y, cx, cy, lod, animated ? time : 0, t.temp, t.moisture);
       else if (lod > 0.3) {
-        ctx.fillStyle = PALETTE.forestTree[0][1];
+        ctx.fillStyle = t.temp < 0.42 ? PALETTE.forestTree[1][1] : PALETTE.forestTree[0][1];
         ctx.beginPath();
         ctx.ellipse(cx, cy, hw * 0.55, hh * 0.55, 0, 0, Math.PI * 2);
         ctx.fill();
@@ -277,10 +285,17 @@ export function drawTile(
     case Terrain.Rock:
       if (lod > 0.6) drawRocks(ctx, x, y, cx, cy);
       break;
+    case Terrain.Sand:
+      if (lod > 0.5) drawDesert(ctx, x, y, cx, cy);
+      break;
+    case Terrain.Tundra:
+      if (lod > 0.55) drawTundra(ctx, x, y, cx, cy);
+      break;
   }
 
   // 雪线（高海拔顶面覆雪）
-  if (t.terrain !== Terrain.Water && (elev >= 5 || (elev === 4 && vhash(x, y, 5) > 0.55))) {
+  if (t.terrain !== Terrain.Water && t.terrain !== Terrain.Sand
+    && (elev >= 5 || (elev === 4 && vhash(x, y, 5) > 0.55))) {
     ctx.fillStyle = 'rgba(244,241,235,0.88)';
     ctx.beginPath();
     ctx.moveTo(cx, cy - hh * 0.7);
@@ -308,10 +323,10 @@ export function drawTile(
   }
 }
 
-/** 草丛 + 稀疏小花 */
-function drawGrassTufts(ctx: CanvasRenderingContext2D, x: number, y: number, cx: number, cy: number) {
+/** 草丛 + 稀疏小花（热带更浓绿） */
+function drawGrassTufts(ctx: CanvasRenderingContext2D, x: number, y: number, cx: number, cy: number, temp: number) {
   const n = 4 + ((vhash(x, y, 28) * 3) | 0);
-  ctx.strokeStyle = 'rgba(96,140,74,0.55)';
+  ctx.strokeStyle = temp > 0.7 ? 'rgba(70,128,58,0.6)' : 'rgba(96,140,74,0.55)';
   ctx.lineWidth = 1;
   ctx.beginPath();
   for (let i = 0; i < n; i++) {
@@ -360,16 +375,26 @@ function drawFurrows(ctx: CanvasRenderingContext2D, x: number, y: number, cx: nu
 const hw2 = () => TILE_W / 2;
 const hh2 = () => TILE_H / 2;
 
-/** v3.0 精细树：高大（22~36px，约 2 倍小人身高），三种形态，风摆，近景落叶 */
-function drawTrees(ctx: CanvasRenderingContext2D, x: number, y: number, cx: number, cy: number, lod: number, time: number) {
+/**
+ * v4.0 精细树（气候驱动形态）：
+ * - 寒带（temp<0.42）：针叶树，三层叠锥
+ * - 丛林（temp>0.72 且湿润）：更高大的深绿阔冠
+ * - 温带：阔叶/白桦
+ * 高大（22~36px，约 2 倍小人身高），风摆，近景落叶。
+ */
+function drawTrees(ctx: CanvasRenderingContext2D, x: number, y: number, cx: number, cy: number, lod: number, time: number, temp: number, moist: number) {
+  const jungle = temp > 0.72 && moist > 0.5;
   const positions = [[-15, 3], [9, -5], [-3, 9], [13, 9], [-13, -7]];
-  const n = 2 + ((vhash(x, y, 51) * 3) | 0);
+  const n = jungle ? 3 + ((vhash(x, y, 51) * 3) | 0) : 2 + ((vhash(x, y, 51) * 3) | 0);
   const wind = time ? Math.sin(time * 0.0011 + x * 0.7 + y * 0.4) * 1.6 : 0;
   for (let i = 0; i < n && i < positions.length; i++) {
     const [ox, oy] = positions[i];
-    const variant = (vhash(x, y, 57 + i) * 3) | 0;
-    const big = vhash(x, y, 63 + i) > 0.62;
-    const hgt = (big ? 30 : 22) + vhash(x, y, 61 + i) * 8;
+    let variant: number;
+    if (temp < 0.42) variant = 1; // 针叶
+    else if (jungle) variant = 3; // 丛林
+    else variant = vhash(x, y, 57 + i) > 0.5 ? 0 : 2;
+    const big = vhash(x, y, 63 + i) > 0.62 || jungle;
+    const hgt = (jungle ? 34 : big ? 30 : 22) + vhash(x, y, 61 + i) * 8;
     const tx = cx + ox, ty = cy + oy;
     const cols = PALETTE.forestTree[variant];
     // 阴影
@@ -388,7 +413,6 @@ function drawTrees(ctx: CanvasRenderingContext2D, x: number, y: number, cx: numb
     ctx.fill();
     // 树冠（随风轻摆）
     const sx = wind * (0.4 + i * 0.18);
-    ctx.fillStyle = cols[1];
     if (variant === 1) {
       // 松柏：三层叠锥
       for (let l = 0; l < 3; l++) {
@@ -402,6 +426,20 @@ function drawTrees(ctx: CanvasRenderingContext2D, x: number, y: number, cx: numb
         ctx.fillStyle = l === 2 ? cols[0] : cols[1];
         ctx.fill();
       }
+    } else if (variant === 3) {
+      // 丛林：宽厚叠冠（多团椭圆）
+      ctx.fillStyle = cols[1];
+      ctx.beginPath();
+      ctx.ellipse(tx + sx - 5, ty - hgt * 0.58, 11, 8, -0.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = cols[0];
+      ctx.beginPath();
+      ctx.ellipse(tx + sx + 5, ty - hgt * 0.66, 11, 8, 0.25, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = cols[2];
+      ctx.beginPath();
+      ctx.ellipse(tx + sx, ty - hgt * 0.86, 9, 6.5, 0, 0, Math.PI * 2);
+      ctx.fill();
     } else {
       // 阔叶/白桦：两团椭圆 + 主团
       ctx.fillStyle = cols[1];
@@ -545,16 +583,110 @@ function drawRocks(ctx: CanvasRenderingContext2D, x: number, y: number, cx: numb
   }
 }
 
+/** v4.0 沙漠：沙色波纹 + 仙人掌 + 枯草 */
+function drawDesert(ctx: CanvasRenderingContext2D, x: number, y: number, cx: number, cy: number) {
+  const h = vhash(x, y, 111);
+  // 沙丘波纹（风向一致的曲线）
+  ctx.strokeStyle = 'rgba(196,168,110,0.5)';
+  ctx.lineWidth = 1.2;
+  ctx.beginPath();
+  for (let i = 0; i < 2; i++) {
+    const oy = (i - 0.5) * 7 + h * 3;
+    ctx.moveTo(cx - hw2() * 0.72, cy + oy);
+    ctx.quadraticCurveTo(cx, cy + oy - 3.5, cx + hw2() * 0.72, cy + oy + 1);
+  }
+  ctx.stroke();
+  // 高光（阳面沙脊）
+  ctx.strokeStyle = 'rgba(240,222,178,0.4)';
+  ctx.beginPath();
+  for (let i = 0; i < 2; i++) {
+    const oy = (i - 0.5) * 7 + h * 3 - 1.5;
+    ctx.moveTo(cx - hw2() * 0.72, cy + oy);
+    ctx.quadraticCurveTo(cx, cy + oy - 3.5, cx + hw2() * 0.72, cy + oy + 1);
+  }
+  ctx.stroke();
+  // 仙人掌（稀疏）
+  if (vhash(x, y, 113) > 0.88) {
+    const px = cx + (vhash(x, y, 117) - 0.5) * TILE_W * 0.5;
+    const py = cy + (vhash(x, y, 119) - 0.5) * TILE_H * 0.4;
+    ctx.fillStyle = 'rgb(88,128,74)';
+    ctx.fillRect(px - 1.6, py - 13, 3.2, 13);
+    ctx.fillRect(px - 5.5, py - 9.5, 2.6, 4.5);
+    ctx.fillRect(px - 5.5, py - 10.5, 5.5, 2.4);
+    ctx.fillRect(px + 3, py - 8, 2.4, 3.5);
+    ctx.fillRect(px - 0.6, py - 10.5, 4.6, 2.2);
+    // 刺
+    if (vhash(x, y, 123) > 0.5) {
+      ctx.strokeStyle = 'rgba(240,240,210,0.6)';
+      ctx.lineWidth = 0.7;
+      ctx.beginPath();
+      ctx.moveTo(px - 1.6, py - 6); ctx.lineTo(px - 3.4, py - 7.4);
+      ctx.moveTo(px + 1.6, py - 5); ctx.lineTo(px + 3.2, py - 6.2);
+      ctx.stroke();
+    }
+  } else if (vhash(x, y, 127) > 0.72) {
+    // 枯草团
+    const px = cx + (vhash(x, y, 131) - 0.5) * TILE_W * 0.55;
+    const py = cy + (vhash(x, y, 137) - 0.5) * TILE_H * 0.5;
+    ctx.strokeStyle = 'rgba(178,158,104,0.7)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    for (let i = 0; i < 4; i++) {
+      const a = -Math.PI / 2 + (i - 1.5) * 0.3;
+      ctx.moveTo(px, py);
+      ctx.lineTo(px + Math.cos(a) * 5, py + Math.sin(a) * 5);
+    }
+    ctx.stroke();
+  }
+}
+
+/** v4.0 苔原：雪斑 + 矮灌木 + 地衣 */
+function drawTundra(ctx: CanvasRenderingContext2D, x: number, y: number, cx: number, cy: number) {
+  const h = vhash(x, y, 141);
+  // 雪斑
+  if (h > 0.4) {
+    ctx.fillStyle = `rgba(238,242,246,${0.25 + h * 0.4})`;
+    ctx.beginPath();
+    ctx.ellipse(cx + (h - 0.5) * 18, cy + (vhash(x, y, 143) - 0.5) * 10, 12, 5.5, -0.15, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  // 矮灌木（深绿小团，抗寒的硬叶）
+  if (vhash(x, y, 147) > 0.45) {
+    const n = 2 + ((vhash(x, y, 149) * 2) | 0);
+    for (let i = 0; i < n; i++) {
+      const px = cx + (vhash(x, y, 151 + i) - 0.5) * TILE_W * 0.6;
+      const py = cy + (vhash(x, y, 157 + i) - 0.5) * TILE_H * 0.5;
+      const s = 2.4 + vhash(x, y, 163 + i) * 2;
+      ctx.fillStyle = 'rgb(74,96,72)';
+      ctx.beginPath();
+      ctx.ellipse(px, py, s, s * 0.72, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = 'rgba(120,150,110,0.5)';
+      ctx.beginPath();
+      ctx.ellipse(px - s * 0.25, py - s * 0.3, s * 0.5, s * 0.36, 0, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+  // 地衣（灰绿涂点）
+  if (vhash(x, y, 167) > 0.6) {
+    ctx.fillStyle = 'rgba(150,158,128,0.4)';
+    const px = cx + (vhash(x, y, 173) - 0.5) * TILE_W * 0.5;
+    const py = cy + (vhash(x, y, 179) - 0.5) * TILE_H * 0.5;
+    ctx.beginPath();
+    ctx.arc(px, py, 2.8 + vhash(x, y, 181) * 2, 0, Math.PI * 2);
+    ctx.fill();
+  }
+}
+
 /** 领地边界（低存在感） */
 export function drawBorders(ctx: CanvasRenderingContext2D, w: WorldState, x: number, y: number, wx: number, wy: number) {
-  const size = w.config.size;
-  const t = w.tiles[y * size + x];
-  if (t.owner < 0) return;
+  const t = tileAt(w, x, y);
+  if (!t || t.owner < 0) return;
   const hw = TILE_W / 2, hh = TILE_H / 2;
   const cx = wx, cy = wy - t.elevation * ELEV_H;
   const neighbor = (nx: number, ny: number) => {
-    if (nx < 0 || ny < 0 || nx >= size || ny >= size) return -2;
-    return w.tiles[ny * size + nx].owner;
+    const n = tileAt(w, nx, ny);
+    return n ? n.owner : -2;
   };
   ctx.strokeStyle = PALETTE.border;
   ctx.lineWidth = 1.5;
@@ -578,65 +710,112 @@ export function drawBorders(ctx: CanvasRenderingContext2D, w: WorldState, x: num
   ctx.stroke();
 }
 
-// ============ 静态地形缓存（性能核心） ============
+// ============ 分块地形缓存（v4.0 性能核心） ============
+
+/** 渲染块尺寸（16×16 tiles；生成 chunk 是 32×32，一个生成块含 2×2 渲染块） */
+export const RC = 16;
+
+/** 渲染块的世界像素原点与外扩边距（容纳悬崖/树木的悬垂） */
+const PAD_L = 56, PAD_R = 56, PAD_T = 112, PAD_B = 28;
+
+export function rcOrigin(rx: number, ry: number): { ox: number; oy: number } {
+  return {
+    ox: (rx * RC - (ry * RC + RC - 1)) * TILE_W / 2 - PAD_L,
+    oy: (rx * RC + ry * RC) * TILE_H / 2 - PAD_T,
+  };
+}
+
+interface Tier { scale: number; cap: number; map: Map<number, HTMLCanvasElement> }
 
 export class TerrainCache {
-  canvas: HTMLCanvasElement | null = null;   // 远景（0.5 倍）
-  hi: HTMLCanvasElement | null = null;        // 近景（0.8 倍）—— v3.0：中高缩放直接贴图
-  dirty = true;
-  private loScale = 0.5;
-  private hiScale = 0.8;
+  private tiers: Tier[] = [
+    { scale: 0.22, cap: 150, map: new Map() },
+    { scale: 0.45, cap: 64, map: new Map() },
+    { scale: 0.8, cap: 34, map: new Map() },
+  ];
+  /** 每帧构建预算（防止滚动时卡顿） */
+  private budget = 3;
+  private canvasPool: HTMLCanvasElement[] = [];
 
-  /** 生成/重建缓存（整图一次成图） */
-  private buildInto(cv: HTMLCanvasElement | null, w: WorldState, scale: number): HTMLCanvasElement {
-    const size = w.config.size;
-    const worldW = size * TILE_W, worldH = size * TILE_H + ELEV_H * 8;
-    const c2 = cv ?? document.createElement('canvas');
-    const cw = Math.ceil(worldW * scale), ch = Math.ceil(worldH * scale);
-    if (c2.width !== cw || c2.height !== ch) {
-      c2.width = cw; c2.height = ch;
-    }
-    const c = c2.getContext('2d')!;
+  tierFor(zoom: number): number {
+    return zoom < 0.34 ? 0 : zoom < 0.72 ? 1 : 2;
+  }
+
+  /** 恢复每帧预算（render 循环开头调用） */
+  resetBudget() { this.budget = 3; }
+
+  /** 构建一个渲染块的缓存画布 */
+  private build(w: WorldState, rx: number, ry: number, tier: Tier): HTMLCanvasElement {
+    const scale = tier.scale;
+    const baseW = (2 * RC - 1) * TILE_W / 2 + TILE_W + PAD_L + PAD_R;
+    const baseH = (2 * RC - 1) * TILE_H / 2 + TILE_H + PAD_T + PAD_B;
+    const cv = this.canvasPool.pop() ?? document.createElement('canvas');
+    cv.width = Math.ceil(baseW * scale);
+    cv.height = Math.ceil(baseH * scale);
+    const c = cv.getContext('2d')!;
     c.setTransform(1, 0, 0, 1, 0, 0);
-    c.clearRect(0, 0, cw, ch);
+    c.clearRect(0, 0, cv.width, cv.height);
     c.scale(scale, scale);
-    c.translate(worldW / 2, ELEV_H * 5);
-    for (let sum = 0; sum <= 2 * (size - 1); sum++) {
-      for (let x = Math.max(0, sum - size + 1); x <= Math.min(size - 1, sum); x++) {
-        const y = sum - x;
+    c.translate(PAD_L + TILE_W / 2, PAD_T + TILE_H / 2);
+    // 按绘制顺序（sum 递增）遍历块内格子
+    for (let sum = 0; sum <= 2 * (RC - 1); sum++) {
+      for (let lx = Math.max(0, sum - RC + 1); lx <= Math.min(RC - 1, sum); lx++) {
+        const ly = sum - lx;
+        const x = rx * RC + lx, y = ry * RC + ly;
         const p = { x: (x - y) * TILE_W / 2, y: (x + y) * TILE_H / 2 };
         drawTile(c, w, x, y, p.x, p.y, 0, 0.9, false);
       }
     }
-    return c2;
+    return cv;
   }
 
-  /** 生成/重建远景缓存（半分辨率） */
-  build(w: WorldState) {
-    this.canvas = this.buildInto(this.canvas, w, this.loScale);
-    this.dirty = false;
+  /** 取渲染块画布（没有则消耗预算构建；预算耗尽返回 null） */
+  get(w: WorldState, rx: number, ry: number, tierIdx: number): HTMLCanvasElement | null {
+    const tier = this.tiers[tierIdx];
+    const rcPerRow = Math.ceil(w.gen.size / RC);
+    const key = ry * rcPerRow + rx;
+    let cv = tier.map.get(key);
+    if (cv) return cv;
+    if (rx < 0 || ry < 0 || rx >= rcPerRow || ry >= rcPerRow) return null;
+    if (this.budget <= 0) {
+      // 预算耗尽：尝试降档画布（放大的旧远景，比空白好）
+      for (let t = tierIdx - 1; t >= 0; t--) {
+        const lower = this.tiers[t].map.get(key);
+        if (lower) return lower;
+      }
+      return null;
+    }
+    this.budget--;
+    cv = this.build(w, rx, ry, tier);
+    tier.map.set(key, cv);
+    if (tier.map.size > tier.cap) {
+      // LRU 淘汰：Map 迭代序 = 插入序，删最早的
+      const first = tier.map.keys().next().value as number;
+      const old = tier.map.get(first)!;
+      tier.map.delete(first);
+      if (this.canvasPool.length < 24) this.canvasPool.push(old);
+    }
+    return cv;
   }
 
-  /** 生成/重建近景缓存（0.8 倍；首次在中高缩放时构建，一次性成本） */
-  buildHi(w: WorldState) {
-    this.hi = this.buildInto(this.hi, w, this.hiScale);
-    this.dirty = false;
+  /** 神力修改地形后：作废对应渲染块（全部档位） */
+  invalidate(w: WorldState, x: number, y: number): void {
+    const rcPerRow = Math.ceil(w.gen.size / RC);
+    const rx = Math.floor(x / RC), ry = Math.floor(y / RC);
+    const key = ry * rcPerRow + rx;
+    for (const tier of this.tiers) tier.map.delete(key);
+    // 相邻渲染块边缘可能受影响（悬崖侧壁读邻居）
+    for (const [dx, dy] of [[-1, 0], [1, 0], [0, -1], [0, 1]] as const) {
+      const nx = rx + dx, ny = ry + dy;
+      if (nx < 0 || ny < 0 || nx >= rcPerRow || ny >= rcPerRow) continue;
+      const nk = ny * rcPerRow + nx;
+      for (const tier of this.tiers) tier.map.delete(nk);
+    }
   }
 
-  /** 远景贴图（ctx 需已应用世界变换） */
-  blit(ctx: CanvasRenderingContext2D, w: WorldState) {
-    if (!this.canvas || this.dirty) this.build(w);
-    const size = w.config.size;
-    const worldW = size * TILE_W, worldH = size * TILE_H;
-    ctx.drawImage(this.canvas!, -worldW / 2, -ELEV_H * 5, worldW, worldH + ELEV_H * 8);
-  }
-
-  /** 近景贴图（0.8 缩放构建、按目标尺寸放大，视觉无损级） */
-  blitHi(ctx: CanvasRenderingContext2D, w: WorldState) {
-    if (!this.hi || this.dirty) this.buildHi(w);
-    const size = w.config.size;
-    const worldW = size * TILE_W, worldH = size * TILE_H;
-    ctx.imageSmoothingEnabled = true;
-    ctx.drawImage(this.hi!, -worldW / 2, -ELEV_H * 5, worldW, worldH + ELEV_H * 8);
+  invalidateAll(): void {
+    for (const tier of this.tiers) tier.map.clear();
   }
 }
+
+void CHUNK;

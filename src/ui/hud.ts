@@ -1,15 +1,15 @@
 /**
- * HUD — 顶栏 / 神力工具栏 / 事件流 / toast（v2.0）
+ * HUD — 顶栏 / 神力工具栏 / 事件流 / toast（v4.0）
  * - 神力四组：造物 / 天象 / 灾厄 / 启蒙
  * - 左侧工具栏与右侧详情栏可收缩（localStorage 记忆）
- * - 顶栏显示文明政体称谓
+ * - 顶栏：世界纪元（人类历史进程）+ 观察文明的社会形态 + 万邦列表面板
  */
 import { FORM_NAMES, type WorldState, type GodPowerId } from '../types';
 import { GOD_POWERS } from '../powers';
 import { icon } from './icons';
 import { macroEconomy } from '../sim/economy';
 import { formLabel, classifySociety } from '../sim/society';
-import { civEntityName } from '../names';
+import { civEntityName, worldEra } from '../names';
 
 export interface HudCallbacks {
   onSpeed: (s: number) => void;
@@ -27,6 +27,8 @@ export interface HudCallbacks {
   onMute: () => void;
   onHome: () => void;
   onCollapseToolbar: (collapsed: boolean) => void;
+  /** v4.0：万邦列表面板 */
+  onCivs: () => void;
 }
 
 export interface HudState {
@@ -47,10 +49,12 @@ export function buildHud(root: HTMLElement, cbs: HudCallbacks, topbarHost?: HTML
       <span class="seed" id="brand-seed">seed —</span>
     </div>
     <div class="top-stat" id="stat-year" title="当前年份">${icon('clock', 16)}<b id="year-v">0</b>&nbsp;年</div>
-    <div class="badge-form" id="badge-form" title="点击查看社会形态详情">原始社会</div>
-    <div class="top-stat" id="stat-entity" title="文明的政治实体称谓">${icon('people', 15)}<b id="entity-v">部族</b></div>
-    <div class="top-stat clickable" id="stat-pop" title="总人口（点击查看观察者数据）">${icon('people', 16)}<b id="pop-v">0</b></div>
-    <div class="top-stat clickable" id="stat-food" title="粮食保障率">${icon('wheat', 16)}<b id="food-v">—</b></div>
+    <div class="badge-era" id="badge-era" title="世界纪元：由最先进文明的技术水平推导">石器时代</div>
+    <div class="badge-form clickable" id="badge-form" title="点击查看观察文明的社会形态详情">原始社会</div>
+    <button class="icon-btn" id="btn-civs" title="万邦 · 世界诸文明列表">${icon('people', 18)}<b id="civs-count">1</b></button>
+    <div class="top-stat" id="stat-entity" title="观察文明的政治实体称谓">${icon('people', 15)}<b id="entity-v">部族</b></div>
+    <div class="top-stat clickable" id="stat-pop" title="世界总人口（点击查看观察者数据）">${icon('people', 16)}<b id="pop-v">0</b></div>
+    <div class="top-stat clickable" id="stat-food" title="观察文明粮食保障率">${icon('wheat', 16)}<b id="food-v">—</b></div>
     <div class="topbar-spacer"></div>
     <div class="speed-controls" id="speed-ctl">
       <button data-speed="0" title="暂停 (空格)">${icon('pause', 17)}</button>
@@ -61,7 +65,7 @@ export function buildHud(root: HTMLElement, cbs: HudCallbacks, topbarHost?: HTML
       <button data-speed="16" title="岁月如梭 (5)">${icon('fff', 12)}<span style="font-size:9px;font-weight:700">16×</span></button>
       <button id="step-btn" title="单步推进一年（暂停时可用）">${icon('step', 16)}</button>
     </div>
-    <button class="icon-btn" id="btn-home" title="全景视角 · 缩放到整张地图 (H)">${icon('home', 18)}</button>
+    <button class="icon-btn" id="btn-home" title="回到观察文明的家园 (H)">${icon('home', 18)}</button>
     <button class="icon-btn" id="btn-chronicle" title="历史编年史 (C)">${icon('book', 18)}</button>
     <button class="icon-btn" id="btn-observer" title="观察者数据 (O)">${icon('chart', 18)}</button>
     <button class="icon-btn" id="btn-save" title="保存 / 读取 (S)">${icon('save', 18)}</button>
@@ -136,6 +140,8 @@ export function buildHud(root: HTMLElement, cbs: HudCallbacks, topbarHost?: HTML
     if (!Number.isNaN(s)) cbs.onSpeed(s);
   });
   topbar.querySelector('#badge-form')!.addEventListener('click', cbs.onFormBadge);
+  topbar.querySelector('#badge-era')?.addEventListener('click', cbs.onFormBadge);
+  topbar.querySelector('#btn-civs')?.addEventListener('click', cbs.onCivs);
   topbar.querySelector('#stat-pop')!.addEventListener('click', cbs.onPopStat);
   topbar.querySelector('#stat-food')!.addEventListener('click', cbs.onFoodStat);
   topbar.querySelector('#btn-home')!.addEventListener('click', cbs.onHome);
@@ -197,28 +203,43 @@ export function setHudBrush(toolbar: HTMLElement, brush: number) {
   });
 }
 
-/** 每帧/每年刷新顶栏数据 */
+/** 每帧/每年刷新顶栏数据（v4.0：世界纪元 + 观察文明 + 万邦计数） */
 export function updateTopbar(root: HTMLElement, w: WorldState, worldName: string) {
-  const macro = macroEconomy(w);
-  const cls = classifySociety(w);
+  const civ = w.civs[w.observedCiv] ?? w.civs[0];
+  const macro = macroEconomy(w, civ);
+  const cls = classifySociety(w, civ);
   (root.querySelector('#brand-name') as HTMLElement).textContent = worldName;
   (root.querySelector('#brand-seed') as HTMLElement).textContent = `seed ${w.config.seed} · ${w.config.size}×${w.config.size} · ${w.config.mode === 'free' ? '自由上帝' : '有限干预'}`;
   (root.querySelector('#year-v') as HTMLElement).textContent = String(w.year);
-  // 政体称谓
-  const largest = w.settlements.filter(s => !s.dead).sort((a, b) => b.population - a.population)[0];
-  const entity = civEntityName(w.civ.form, largest?.stage ?? 'camp', w.settlements.filter(s => !s.dead).length);
+  // 世界纪元（人类历史进程）
+  const era = worldEra(w);
+  const eraEl = root.querySelector('#badge-era') as HTMLElement | null;
+  if (eraEl && eraEl.textContent !== era.name) {
+    eraEl.textContent = era.name;
+    eraEl.title = era.desc;
+  }
+  // 万邦计数
+  const civCountEl = root.querySelector('#civs-count') as HTMLElement | null;
+  if (civCountEl) civCountEl.textContent = String(w.civs.filter(c => !c.dead).length);
+  // 政体称谓（观察文明）
+  const mySettlements = w.settlements.filter(s => !s.dead && s.civId === civ.id);
+  const largest = mySettlements.sort((a, b) => b.population - a.population)[0];
+  const entity = civEntityName(civ.form, largest?.stage ?? 'camp', mySettlements.length);
   const entityEl = root.querySelector('#entity-v') as HTMLElement;
   if (entityEl.textContent !== entity) entityEl.textContent = entity;
   const badge = root.querySelector('#badge-form') as HTMLElement;
-  const newLabel = formLabel(cls);
+  const newLabel = `${civ.name.slice(0, 4)} · ${formLabel(cls)}`;
   if (badge.textContent !== newLabel) {
     badge.textContent = newLabel;
     badge.classList.remove('changed');
     void badge.offsetWidth; // 重启动画
     badge.classList.add('changed');
   }
-  (root.querySelector('#pop-v') as HTMLElement).textContent = macro.population >= 10000
-    ? `${(macro.population / 1000).toFixed(1)}k` : String(macro.population);
+  // 世界总人口
+  let worldPop = 0;
+  for (const s of w.settlements) if (!s.dead) worldPop += s.population;
+  (root.querySelector('#pop-v') as HTMLElement).textContent = worldPop >= 10000
+    ? `${(worldPop / 1000).toFixed(1)}k` : String(worldPop);
   const foodEl = root.querySelector('#food-v') as HTMLElement;
   const ratio = macro.foodRatio;
   foodEl.textContent = `${Math.round(ratio * 100)}%`;

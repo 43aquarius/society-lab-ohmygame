@@ -1,17 +1,13 @@
 /**
- * GodPowerSystem — 玩家的神力操作
+ * GodPowerSystem v4.0 — 玩家的神力操作
  * 神力直接修改真实模拟状态（地形/天气/产出/知识/思想），
  * 有限干预模式下受神力能量约束；自由模式无限制。
- * 所有作用立即反映在地图与模拟中。
- *
- * v2.0 神力扩充（17 种）：
- * - 造物：森林 / 沃土 / 草原 / 涌泉 / 矿藏 / 造山
- * - 天象：唤雨 / 降旱
- * - 灾厄：陨星 / 风暴 / 野火 / 瘟疫
- * - 启蒙：祝福 / 启蒙 / 思想 / 治愈 / 奠基（新聚落）
+ * v4.0：地形修改走分块 API 并标记 modified（随存档保存）；
+ * 文明级神力作用于指定文明（镜头观察的文明）。
  */
 import { CFG } from './config';
-import { Terrain, type WorldState, type GodPowerId, type Rng } from './types';
+import { Terrain, type WorldState, type GodPowerId } from './types';
+import { tileAt, markDirty } from './worldgen';
 import { spawnSplinter } from './sim/population';
 
 export interface GodPowerDef {
@@ -43,8 +39,8 @@ export const GOD_POWERS: GodPowerDef[] = [
   { id: 'pestilence', name: '瘟疫降临', icon: 'pestilence', group: 'calamity', brush: false, cost: CFG.costs.pestilence, desc: '向最近的聚落降下高致命疫病' },
   // —— 启蒙 ——
   { id: 'blessing', name: '丰产祝福', icon: 'blessing', group: 'guide', brush: true, cost: CFG.costs.blessing, desc: '祝福一处聚落，六年内收成大增' },
-  { id: 'enlighten', name: '知识启蒙', icon: 'enlighten', group: 'guide', brush: false, cost: CFG.costs.enlighten, desc: '向文明注入灵光，加速技术与思想' },
-  { id: 'ideas', name: '思想传播', icon: 'ideas', group: 'guide', brush: false, cost: CFG.costs.ideas, desc: '传播平等与组织的观念，提升参与和组织力' },
+  { id: 'enlighten', name: '知识启蒙', icon: 'enlighten', group: 'guide', brush: false, cost: CFG.costs.enlighten, desc: '向观察中的文明注入灵光，加速技术与思想' },
+  { id: 'ideas', name: '思想传播', icon: 'ideas', group: 'guide', brush: false, cost: CFG.costs.ideas, desc: '向观察中的文明传播平等与组织的观念' },
   { id: 'heal', name: '治愈之光', icon: 'heal', group: 'guide', brush: false, cost: CFG.costs.heal, desc: '涤净所有疫病，并赐予数年的康健' },
   { id: 'found', name: '奠基之柱', icon: 'found', group: 'guide', brush: false, cost: CFG.costs.found, desc: '引导一批移民在指定之地建立新聚落' },
 ];
@@ -55,13 +51,13 @@ export interface CastResult {
   /** 实际影响的格数（反馈用） */
   tiles: number;
   settlementId?: number;
+  civId?: number;
 }
 
 /** 笔刷地形神力（含目标类：陨星/瘟疫/奠基走独立分支） */
 export function castBrushPower(w: WorldState, id: GodPowerId, cx: number, cy: number, radius: number): CastResult {
   const def = GOD_POWERS.find(p => p.id === id)!;
   if (!canAfford(w, def.cost)) return { ok: false, message: '神力不足，等待恢复…', tiles: 0 };
-  const size = w.config.size;
 
   // —— 目点型神力 ——
   if (id === 'meteor') return castMeteor(w, cx, cy);
@@ -74,8 +70,8 @@ export function castBrushPower(w: WorldState, id: GodPowerId, cx: number, cy: nu
     for (let dx = -radius; dx <= radius; dx++) {
       if (dx * dx + dy * dy > radius * radius + radius) continue;
       const x = cx + dx, y = cy + dy;
-      if (x < 0 || y < 0 || x >= size || y >= size) continue;
-      const t = w.tiles[y * size + x];
+      const t = tileAt(w, x, y);
+      if (!t) continue;
       if (t.terrain === Terrain.Mountain && id !== 'ore' && id !== 'water' && id !== 'meadow' && id !== 'uplift') continue;
       if (t.terrain === Terrain.Water && id !== 'fertile' && id !== 'forest' && id !== 'uplift' && id !== 'rain' && id !== 'drought' && id !== 'storm') continue;
       touched++;
@@ -84,6 +80,7 @@ export function castBrushPower(w: WorldState, id: GodPowerId, cx: number, cy: nu
           if (t.terrain !== Terrain.Mountain) {
             t.terrain = Terrain.Forest;
             t.fertility = Math.max(t.fertility, 0.35);
+            markDirty(w, x, y);
           }
           break;
         case 'fertile':
@@ -91,26 +88,31 @@ export function castBrushPower(w: WorldState, id: GodPowerId, cx: number, cy: nu
             t.terrain = Terrain.Fertile;
             t.fertility = 0.85;
             t.moisture = Math.max(t.moisture, 0.55);
+            markDirty(w, x, y);
           }
           break;
         case 'meadow':
           t.terrain = Terrain.Grass;
           t.elevation = Math.min(t.elevation, 1);
           t.fertility = Math.max(t.fertility, 0.45);
+          markDirty(w, x, y);
           break;
         case 'water':
           if (t.terrain !== Terrain.Mountain) {
             t.terrain = Terrain.Water;
             t.elevation = 0;
+            markDirty(w, x, y);
           }
           break;
         case 'ore':
           if (t.terrain === Terrain.Hills || t.terrain === Terrain.Mountain || t.terrain === Terrain.Rock) {
             t.ore = true;
+            markDirty(w, x, y);
           } else if (t.terrain !== Terrain.Water) {
             t.terrain = Terrain.Rock;
             t.ore = true;
             t.fertility = 0.08;
+            markDirty(w, x, y);
           }
           break;
         case 'uplift': {
@@ -127,26 +129,34 @@ export function castBrushPower(w: WorldState, id: GodPowerId, cx: number, cy: nu
             t.terrain = t.elevation >= 5 ? Terrain.Mountain : t.elevation >= 3 ? Terrain.Hills : t.terrain;
           }
           t.fertility = Math.min(t.fertility, 0.15);
+          markDirty(w, x, y);
           break;
         }
         case 'rain': {
-          const cell = w.weather[y * size + x];
+          const key = y * w.gen.size + x;
+          const cell = w.weather.get(key) ?? { wet: 0, years: 0 };
           cell.wet = Math.min(1, cell.wet + 0.8);
           cell.years = Math.max(cell.years, 5);
+          w.weather.set(key, cell);
           t.moisture = Math.min(1, t.moisture + 0.12);
           break;
         }
         case 'drought': {
-          const cell = w.weather[y * size + x];
+          const key = y * w.gen.size + x;
+          const cell = w.weather.get(key) ?? { wet: 0, years: 0 };
           cell.wet = Math.max(-1, cell.wet - 0.95);
           cell.years = Math.max(cell.years, 5);
+          w.weather.set(key, cell);
           t.moisture = Math.max(0, t.moisture - 0.18);
+          markDirty(w, x, y);
           break;
         }
         case 'storm': {
-          const cell = w.weather[y * size + x];
+          const key = y * w.gen.size + x;
+          const cell = w.weather.get(key) ?? { wet: 0, years: 0 };
           cell.wet = Math.min(1, cell.wet + 0.6);
           cell.years = Math.max(cell.years, 4);
+          w.weather.set(key, cell);
           // 风暴即时摧毁该区域的在建设施与部分农田
           for (const s of w.settlements) {
             if (s.dead) continue;
@@ -163,10 +173,12 @@ export function castBrushPower(w: WorldState, id: GodPowerId, cx: number, cy: nu
         }
         case 'wildfire': {
           // 焚毁森林与农田，留下焦土（临时通过 weather 干旱表达）
-          if (t.terrain === Terrain.Forest) { t.terrain = Terrain.Grass; t.fertility *= 0.6; }
-          const cell = w.weather[y * size + x];
+          if (t.terrain === Terrain.Forest) { t.terrain = Terrain.Grass; t.fertility *= 0.6; markDirty(w, x, y); }
+          const key = y * w.gen.size + x;
+          const cell = w.weather.get(key) ?? { wet: 0, years: 0 };
           cell.wet = Math.max(-1, cell.wet - 0.4);
           cell.years = Math.max(cell.years, 2);
+          w.weather.set(key, cell);
           for (const s of w.settlements) {
             if (s.dead) continue;
             if (Math.hypot(s.x - x, s.y - y) > radius + 1.5) continue;
@@ -212,20 +224,22 @@ export function castBrushPower(w: WorldState, id: GodPowerId, cx: number, cy: nu
 
 /** 陨星：永久改变地形（坑洞岩石），摧毁范围内建筑与人口 */
 function castMeteor(w: WorldState, cx: number, cy: number): CastResult {
-  const size = w.config.size;
-  const t = w.tiles[cy * size + cx];
+  const t = tileAt(w, cx, cy);
   if (!t) return { ok: false, message: '点击在沙盘之外', tiles: 0 };
   spend(w, CFG.costs.meteor);
   w.interventions++;
   // 坑洞：中心变岩石，周围受损
   t.terrain = Terrain.Rock;
   t.fertility = 0.05;
+  markDirty(w, cx, cy);
   for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
     const x = cx + dx, y = cy + dy;
-    if (x < 0 || y < 0 || x >= size || y >= size || (dx === 0 && dy === 0)) continue;
-    const t2 = w.tiles[y * size + x];
+    if (dx === 0 && dy === 0) continue;
+    const t2 = tileAt(w, x, y);
+    if (!t2) continue;
     if (t2.terrain === Terrain.Forest) t2.terrain = Terrain.Grass;
     t2.fertility *= 0.5;
+    markDirty(w, x, y);
   }
   let dead = 0;
   let destroyed = 0;
@@ -256,7 +270,7 @@ function castMeteor(w: WorldState, cx: number, cy: number): CastResult {
 /** 瘟疫：对最近聚落投放高致命疫病 */
 function castPestilence(w: WorldState, cx: number, cy: number): CastResult {
   let best = Infinity;
-  let target = null;
+  let target: typeof w.settlements[number] | null = null;
   for (const s of w.settlements) {
     if (s.dead) continue;
     const d = Math.hypot(s.x - cx, s.y - cy);
@@ -267,62 +281,67 @@ function castPestilence(w: WorldState, cx: number, cy: number): CastResult {
   w.interventions++;
   const lethality = 0.09;
   w.activeEvents.push({ id: 'plague-outbreak', year: w.year, yearsLeft: 4, data: { lethality, settlementId: target.id } });
-  w.civ.vars.unrest = Math.min(1, w.civ.vars.unrest + 0.12);
-  return { ok: true, message: `疫病在${target.name}蔓延开来`, tiles: 1, settlementId: target.id };
+  w.civs[target.civId].vars.unrest = Math.min(1, w.civs[target.civId].vars.unrest + 0.12);
+  return { ok: true, message: `疫病在${target.name}蔓延开来`, tiles: 1, settlementId: target.id, civId: target.civId };
 }
 
 /** 奠基：从最大聚落引导移民建立新聚落 */
 function castFound(w: WorldState, cx: number, cy: number): CastResult {
-  const size = w.config.size;
+  const size = w.gen.size;
   if (cx < 2 || cy < 2 || cx >= size - 2 || cy >= size - 2) return { ok: false, message: '离沙盘边缘太近了', tiles: 0 };
-  const t = w.tiles[cy * size + cx];
+  const t = tileAt(w, cx, cy);
+  if (!t) return { ok: false, message: '点击在沙盘之外', tiles: 0 };
   if (t.terrain === Terrain.Water) return { ok: false, message: '不能在水上奠基', tiles: 0 };
   if (t.terrain === Terrain.Mountain) return { ok: false, message: '山地无法奠基', tiles: 0 };
+  if (t.terrain === Terrain.Sand) return { ok: false, message: '流沙无法奠基', tiles: 0 };
   for (const s of w.settlements) {
     if (!s.dead && Math.hypot(s.x - cx, s.y - cy) < 7) {
       return { ok: false, message: '离既有聚落太近（需相隔 7 格以上）', tiles: 0 };
     }
   }
-  // 移民来源：人口最多的聚落
-  const source = w.settlements.filter(s => !s.dead).sort((a, b) => b.population - a.population)[0];
+  // 移民来源：观察文明中人口最多的聚落（保持文明归属）
+  const source = w.settlements.filter(s => !s.dead && s.civId === w.observedCiv).sort((a, b) => b.population - a.population)[0]
+    ?? w.settlements.filter(s => !s.dead).sort((a, b) => b.population - a.population)[0];
   if (!source || source.population < 90) return { ok: false, message: '没有聚落能派出移民（需 90 人以上）', tiles: 0 };
   spend(w, CFG.costs.found);
   w.interventions++;
   const ns = spawnSplinter(w, source, 16, { x: cx, y: cy });
   if (!ns) return { ok: false, message: '奠基失败', tiles: 0 };
   ns.effects.push({ kind: 'blessing', years: 3, power: 0.2 });
-  return { ok: true, message: `移民们在新土地建立了 ${ns.name}`, tiles: 1, settlementId: ns.id };
+  return { ok: true, message: `移民们在新土地建立了 ${ns.name}`, tiles: 1, settlementId: ns.id, civId: ns.civId };
 }
 
-/** 文明级神力（启蒙/思想/治愈） */
-export function castCivPower(w: WorldState, id: 'enlighten' | 'ideas' | 'heal'): CastResult {
+/** 文明级神力（启蒙/思想/治愈）——作用于指定文明 */
+export function castCivPower(w: WorldState, id: 'enlighten' | 'ideas' | 'heal', civId?: number): CastResult {
   const def = GOD_POWERS.find(p => p.id === id)!;
   if (!canAfford(w, def.cost)) return { ok: false, message: '神力不足，等待恢复…', tiles: 0 };
-  const pop = w.civ.vars.population;
+  const civ = w.civs[civId ?? w.observedCiv];
+  if (!civ || civ.dead) return { ok: false, message: '文明已不存在', tiles: 0 };
+  const pop = civ.vars.population;
   if (pop <= 0) return { ok: false, message: '文明已不存在', tiles: 0 };
   spend(w, def.cost);
   w.interventions++;
   if (id === 'enlighten') {
-    w.civ.enlightenment = Math.min(1.2, w.civ.enlightenment + 0.45);
-    w.civ.tech.points += 22 + pop * 0.012;
-    return { ok: true, message: '灵光注入了求知者的心灵', tiles: 1 };
+    civ.enlightenment = Math.min(1.2, civ.enlightenment + 0.45);
+    civ.tech.points += 22 + pop * 0.012;
+    return { ok: true, message: `灵光注入了${civ.name}求知者的心灵`, tiles: 1, civId: civ.id };
   } else if (id === 'ideas') {
-    w.civ.enlightenment = Math.min(1.2, w.civ.enlightenment + 0.25);
-    const v = w.civ.vars;
+    civ.enlightenment = Math.min(1.2, civ.enlightenment + 0.25);
+    const v = civ.vars;
     v.participation = Math.min(1, v.participation + 0.08);
     v.orgCommon = Math.min(1, v.orgCommon + 0.07);
-    const g = w.civ.groups.find(x => x.id === 'commoners')!;
+    const g = civ.groups.find(x => x.id === 'commoners')!;
     g.ideas = Math.min(1, g.ideas + 0.25);
-    return { ok: true, message: '平等与组织的观念开始流传', tiles: 1 };
+    return { ok: true, message: `平等与组织的观念在${civ.name}流传`, tiles: 1, civId: civ.id };
   } else {
     // 治愈之光：清除全部疫病 + 数年康健
     const plagues = w.activeEvents.filter(ae => ae.id === 'plague-outbreak');
     for (const p of plagues) w.activeEvents.splice(w.activeEvents.indexOf(p), 1);
     for (const s of w.settlements) {
-      if (!s.dead) s.effects.push({ kind: 'healing', years: 4, power: 0.3 });
+      if (!s.dead && s.civId === civ.id) s.effects.push({ kind: 'healing', years: 4, power: 0.3 });
     }
-    w.civ.vars.trust = Math.min(1, w.civ.vars.trust + 0.06);
-    return { ok: true, message: plagues.length ? '神光涤净了大地上的疫病' : '康健之光笼罩了大地', tiles: plagues.length || 1 };
+    civ.vars.trust = Math.min(1, civ.vars.trust + 0.06);
+    return { ok: true, message: plagues.length ? '神光涤净了大地上的疫病' : '康健之光笼罩了大地', tiles: plagues.length || 1, civId: civ.id };
   }
 }
 
@@ -344,8 +363,9 @@ export function castPurify(w: WorldState, settlementId: number): CastResult {
   w.interventions++;
   const s = w.settlements.find(x => x.id === settlementId);
   if (s) {
-    w.civ.tech.progress.medicine = Math.max(w.civ.tech.progress.medicine, 2);
-    w.civ.vars.trust = Math.min(1, w.civ.vars.trust + 0.08);
+    const civ = w.civs[s.civId];
+    civ.tech.progress.medicine = Math.max(civ.tech.progress.medicine, 2);
+    civ.vars.trust = Math.min(1, civ.vars.trust + 0.08);
   }
   return { ok: true, message: '疫病被神力净化', tiles: 1, settlementId };
 }
@@ -357,6 +377,7 @@ export function powerChronicleEntry(w: WorldState, id: GodPowerId, result: CastR
     id: `ev-${w.nextEventId++}`,
     year: w.year,
     title: `神力：${def.name}`,
+    civId: result.civId,
     category: (id === 'enlighten' || id === 'ideas' || id === 'heal' ? 'ideas'
       : id === 'drought' || id === 'rain' ? 'disaster'
         : def.group === 'calamity' ? 'disaster' : 'harvest') as any,

@@ -1,0 +1,21 @@
+import { newWorld, tickYear } from '/home/z/my-project/download/society-lab/src/sim/manager.ts';
+import { serialize, deserialize } from '/home/z/my-project/download/society-lab/src/saves.ts';
+import { tickSettlementEconomy } from '/home/z/my-project/download/society-lab/src/sim/economy.ts';
+import { castBrushPower } from '/home/z/my-project/download/society-lab/src/powers.ts';
+
+const w = newWorld({ seed: 1111, size: 64, mode: 'free', settlements: 1, scenario: 'valley' });
+castBrushPower(w, 'fertile', w.settlements[0].x + 3, w.settlements[0].y + 3, 1);
+for (let i = 0; i < 25; i++) tickYear(w);
+const w2 = (deserialize(serialize(w, 'x')) as any).world;
+const s2 = w2.settlements[0];
+const eco = tickSettlementEconomy(w2, s2);
+console.log('eco:', JSON.stringify(eco, (k, v) => typeof v === 'number' ? Math.round(v * 1000) / 1000 : v));
+console.log('s2 food after:', s2.food);
+const civ = w2.civs[0];
+console.log('civ.vars keys with NaN:', Object.entries(civ.vars).filter(([k, v]) => Number.isNaN(v as number)).map(([k]) => k));
+console.log('civ.tech.levels:', JSON.stringify(civ.tech.levels));
+console.log('civ.tech.progress:', JSON.stringify(civ.tech.progress));
+console.log('civ.tech.points:', civ.tech.points);
+console.log('settlement effects:', JSON.stringify(s2.effects));
+console.log('weather size:', w2.weather.size, 'w:', w.weather.size);
+for (const [k, v] of w2.weather) console.log('weather cell', k, JSON.stringify(v));

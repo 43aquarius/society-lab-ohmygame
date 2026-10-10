@@ -3,7 +3,7 @@
  * 冲突不是随机数：由生存保障、财富/土地集中、劳动制度、组织能力、
  * 国家能力与改革渠道共同决定。同一矛盾允许多种结局。
  */
-import type { WorldState, EventRecord } from '../types';
+import type { WorldState, EventRecord, Civilization } from '../types';
 import { macroEconomy } from './economy';
 import { spawnSplinter } from './population';
 
@@ -15,9 +15,9 @@ export interface ConflictResult {
 }
 
 /** 评估并（可能）触发一次集体行动。无行动返回 null。 */
-export function evaluateConflict(w: WorldState): ConflictResult | null {
-  const v = w.civ.vars;
-  const macro = macroEconomy(w);
+export function evaluateConflict(w: WorldState, civ: Civilization): ConflictResult | null {
+  const v = civ.vars;
+  const macro = macroEconomy(w, civ);
   if (v.unrest < 0.52) return null;
   // 紧张度越高越可能爆发；随机只影响时机，不影响方向
   const tension = (v.unrest - 0.52) / 0.48;
@@ -42,7 +42,7 @@ export function evaluateConflict(w: WorldState): ConflictResult | null {
     repression: repressive ? 2.6 : 0.3,
     revolt: v.orgCommon > 0.4 && !repressive ? 1.8 + tension * 1.6 : 0.4,
     revolution: v.orgCommon > 0.62 && v.orgElite < 0.5 && tension > 0.45 ? 1.2 + v.participation : 0.06,
-    fission: macro.settlementCount < 6 && w.settlements.some(s => !s.dead && s.population > 140) && v.unrest > 0.66 ? 1.1 : 0.2,
+    fission: macro.settlementCount < 8 && w.settlements.some(s => !s.dead && s.civId === civ.id && s.population > 140) && v.unrest > 0.66 ? 1.1 : 0.2,
   };
   let total = 0;
   for (const k of Object.keys(weights) as ConflictOutcome[]) total += weights[k];
@@ -80,7 +80,7 @@ export function evaluateConflict(w: WorldState): ConflictResult | null {
       effects.push('抗议被武力驱散', '制度信任受损', '公共参与收缩');
       break;
     case 'revolt': {
-      const victim = pickLargest(w);
+      const victim = pickLargest(w, civ);
       if (victim) {
         const loss = Math.round(victim.population * w.rng.range(0.03, 0.09));
         victim.population -= loss;
@@ -100,24 +100,37 @@ export function evaluateConflict(w: WorldState): ConflictResult | null {
       break;
     }
     case 'revolution': {
-      // 革命方向取决于主流思想：激进 → 公有化；中产 → 资产阶级革命
-      const radical = (w.civ.groups.find(g => g.id === 'commoners')?.ideas ?? 0) > 0.25
+      // 革命方向取决于主流思想与生产力阶段（历史唯物主义）：
+      // 资产阶级革命需要工业与市场的物质前提；前工业时代的革命
+      // 只能走向财产重新分配或公社化（激进方向）
+      const bourgeoisPossible = (civ.tech.levels.industry ?? 1) >= 2 && v.market > 0.3;
+      const radical = !bourgeoisPossible
+        || (civ.groups.find(g => g.id === 'commoners')?.ideas ?? 0) > 0.25
         || v.ownPublic + v.laborCoop > 0.4;
       if (radical) {
-        v.ownPublic = Math.min(0.9, v.ownPublic + 0.32);
-        v.ownPrivate = Math.max(0.05, v.ownPrivate - 0.3);
-        v.ownCommon = Math.max(0.02, 1 - v.ownPublic - v.ownPrivate);
-        v.laborForced = 0;
-        v.laborBonded = Math.max(0, v.laborBonded - 0.4);
-        v.laborCoop = Math.min(0.95, v.laborCoop + 0.28);
-        v.laborWage = Math.max(0.03, 1 - v.laborForced - v.laborBonded - v.laborCoop);
-        v.participation = Math.min(1, v.participation + 0.2);
-        effects.push('生产资料大规模转入公共与合作社', '强制与依附劳动被废除', '政治参与大幅扩展');
+        if (civ.form === 'primitive') {
+          // 原始社会内部的"革命"：氏族内部的财产与权威重新分配
+          v.wealthElite = Math.max(0.05, v.wealthElite - 0.15);
+          v.wealthCommon = Math.min(0.9, v.wealthCommon + 0.15);
+          v.trust = Math.min(1, v.trust + 0.08);
+          v.participation = Math.min(1, v.participation + 0.1);
+          effects.push('氏族长老的权威被重新分配', '共有财产得以维持');
+        } else {
+          v.ownPublic = Math.min(0.9, v.ownPublic + 0.32);
+          v.ownPrivate = Math.max(0.05, v.ownPrivate - 0.3);
+          v.ownCommon = Math.max(0.02, 1 - v.ownPublic - v.ownPrivate);
+          v.laborForced = Math.max(0, v.laborForced * 0.5);
+          v.laborBonded = Math.max(0, v.laborBonded * 0.55);
+          v.laborCoop = Math.min(0.95, v.laborCoop + 0.28);
+          v.laborWage = Math.max(0.03, 1 - v.laborForced - v.laborBonded - v.laborCoop);
+          v.participation = Math.min(1, v.participation + 0.2);
+          effects.push('生产资料大规模转入公共与合作社', '强制与依附劳动被废除', '政治参与大幅扩展');
+        }
       } else {
         v.ownPrivate = Math.min(0.9, v.ownPrivate + 0.25);
         v.ownPublic = Math.max(0.02, v.ownPublic - 0.2);
-        v.laborWage = Math.min(0.9, v.laborWage + 0.3);
-        v.laborBonded = Math.max(0, v.laborBonded - 0.35);
+        v.laborWage = Math.min(0.9, v.laborWage + 0.28);
+        v.laborBonded = Math.max(0, v.laborBonded * 0.6);
         v.participation = Math.min(1, v.participation + 0.12);
         effects.push('旧等级特权被废除', '市场与雇佣关系成为主导', '中产阶层崛起掌权');
       }
@@ -126,7 +139,7 @@ export function evaluateConflict(w: WorldState): ConflictResult | null {
       break;
     }
     case 'fission': {
-      const big = w.settlements.filter(s => !s.dead && s.population > 140);
+      const big = w.settlements.filter(s => !s.dead && s.civId === civ.id && s.population > 140);
       if (big.length) {
         const ns = spawnSplinter(w, w.rng.pick(big), 18);
         if (ns) {
@@ -151,22 +164,23 @@ export function evaluateConflict(w: WorldState): ConflictResult | null {
     outcome,
     record: {
       year: w.year,
-      title: names[outcome],
+      civId: civ.id,
+      title: `${civ.name} · ${names[outcome]}`,
       category: outcome === 'fission' ? 'migration' : outcome === 'reform' || outcome === 'repression' ? 'politics' : 'war',
       text: `${names[outcome]}在紧张的社会空气中爆发。${effects.join('；')}。`,
       causes,
       effects,
       intervened: false,
       severity: tension,
-      settlementId: pickLargest(w)?.id,
+      settlementId: pickLargest(w, civ)?.id,
     },
   };
 }
 
-function pickLargest(w: WorldState) {
+function pickLargest(w: WorldState, civ: Civilization) {
   let best: WorldState['settlements'][number] | null = null;
   for (const s of w.settlements) {
-    if (s.dead) continue;
+    if (s.dead || s.civId !== civ.id) continue;
     if (!best || s.population > best.population) best = s;
   }
   return best;
