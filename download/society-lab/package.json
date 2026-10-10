@@ -1,6 +1,6 @@
 {
   "name": "society-lab",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "type": "module",
   "description": "Society Lab《人类社会实验室》— 上帝视角社会演化沙盒（OhMyGame web-game 工程）",

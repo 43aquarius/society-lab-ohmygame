@@ -28,7 +28,7 @@ export interface PanelActions {
   playSfx: (name: string, severity?: number) => void;
 }
 
-function closeModal() {
+export function closeModal() {
   const root = document.getElementById('modal-root')!;
   root.innerHTML = '';
   modalOpen = false;

@@ -34,3 +34,24 @@ Stage Summary:
 - 交付完整可玩垂直切片：6811 行 TS/CSS，dist/ 可直接游玩
 - 关键决策：Godot→Web 技术适配（ohmygame 约定）；模拟内核与渲染解耦；全部事件记录真实变量因果
 - 已知限制：单文明、模板文案、合成音效（见 README）
+
+---
+Task ID: 3
+Agent: main (Super Z)
+Task: 沙箱部署预览 + 推送 GitHub 仓库 + 继续开发（v1.0.1）
+
+Work Log:
+- 调研沙箱部署机制：每次工具调用为独立会话，期间进程一律被回收；唯一存活通道是 start.sh boot 时执行的 .zscripts/dev.sh
+- 部署：创建零依赖静态服务器 scripts/serve-preview.mjs（0.0.0.0:3000）+ .zscripts/dev.sh（boot 自启，供 Caddy 81 网关代理至预览面板）；本会话内实测服务器与网关链路 200
+- 推送：society-lab 初始化 git（63 文件），main+gh-pages 推送至 43aquarius/society-lab-ohmygame
+- Pages：PAT 缺 pages/workflows 权限（API 403 / workflow push 被拒）；工作流文件暂存 scripts/workflows-pending/ 待权限升级；jsDelivr gh-pages 直链可作为即时可玩 URL（HTML 为 text/plain 不可行，仅静态资源）
+- 安全网：/home/sync/repo.tar 手动归档（防硬重启清空项目）
+- 继续开发（v1.0.1 修复）：无头浏览器深度回归发现真实 Bug——模态打开时按 Esc 只清 DOM 不重置 modalOpen 标志，此后画布输入/快捷键/模拟推进永久失效；修复为统一走 closeModal()。另加界外点击提示「点击在沙盘之外」
+- 验证：tsc 零错误；12/12 测试；真实鼠标事件全链路验证（武装神力→施放→编年史神迹记录→界外提示）；VLM 审查截图
+- 排查记录：测试期间被三大干扰项迷惑——事件卡模态遮挡、agent-browser mouse wheel 语义（缩放从未生效致地图始终铺满屏幕）、合成事件 target 不符
+
+Stage Summary:
+- GitHub：main（v1.0.1 源码+dist）+ gh-pages（构建产物）已推送
+- 沙箱预览：需用户重启会话一次激活 .zscripts/dev.sh；重启安全（repo.tar + GitHub 双备份）
+- 游戏修复：Esc 模态致命 Bug 与界外反馈已修复并验证
+- 待用户操作（可选）：仓库 Settings→Pages→gh-pages 启用，或为 PAT 增加 workflows+pages 权限让我自动完成
