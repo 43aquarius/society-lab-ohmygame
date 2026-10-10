@@ -1,0 +1,356 @@
+/**
+ * Society Lab — 共享类型定义
+ * 所有模块的数据契约集中在此，保证模拟内核与渲染/UI 解耦。
+ */
+
+/** 中央随机数流，模拟随机与视觉随机分离，保证可复现。 */
+export class Rng {
+  private s: number;
+  constructor(seed: number) {
+    this.s = seed >>> 0 || 0x9e3779b9;
+  }
+  get state(): number {
+    return this.s;
+  }
+  set state(v: number) {
+    this.s = v >>> 0;
+  }
+  /** mulberry32 */
+  next(): number {
+    this.s = (this.s + 0x6d2b79f5) >>> 0;
+    let t = this.s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  }
+  int(maxExclusive: number): number {
+    return Math.floor(this.next() * maxExclusive);
+  }
+  range(min: number, max: number): number {
+    return min + this.next() * (max - min);
+  }
+  chance(p: number): boolean {
+    return this.next() < p;
+  }
+  pick<T>(arr: readonly T[]): T {
+    return arr[this.int(arr.length)];
+  }
+}
+
+export enum Terrain {
+  Water = 0,
+  Grass = 1,
+  Fertile = 2,
+  Forest = 3,
+  Hills = 4,
+  Mountain = 5,
+  Rock = 6,
+}
+
+export const TERRAIN_NAMES: Record<Terrain, string> = {
+  [Terrain.Water]: '水域',
+  [Terrain.Grass]: '草原',
+  [Terrain.Fertile]: '沃土',
+  [Terrain.Forest]: '森林',
+  [Terrain.Hills]: '丘陵',
+  [Terrain.Mountain]: '山地',
+  [Terrain.Rock]: '石地',
+};
+
+export type ResourceKind = 'wood' | 'stone' | 'metal';
+
+/** 地图格。资源与植被随地形派生，但可被神力修改。 */
+export interface Tile {
+  terrain: Terrain;
+  /** 0..1 土地肥沃度 */
+  fertility: number;
+  /** 湿度，影响农业并受天气干预 */
+  moisture: number;
+  /** 海拔层级 0..4（渲染用） */
+  elevation: number;
+  /** 是否含矿脉（丘陵/山地/石地） */
+  ore: boolean;
+  /** 归属聚落 id（领地圈定），-1 为无主 */
+  owner: number;
+}
+
+export enum BuildingKind {
+  Camp = 'camp',
+  Shelter = 'shelter',
+  House = 'house',
+  Farm = 'farm',
+  Granary = 'granary',
+  Well = 'well',
+  Workshop = 'workshop',
+  Market = 'market',
+  Admin = 'admin',
+  Wall = 'wall',
+  Townhouse = 'townhouse',
+  Factory = 'factory',
+  Cooperative = 'cooperative',
+  Services = 'services',
+}
+
+export interface BuildingDef {
+  kind: BuildingKind;
+  name: string;
+  /** 建造年代需求：0 原始 / 1 农业 / 2 城镇 / 3 工业 / 4 现代 */
+  era: number;
+  /** 解锁所需技术（域:等级），域见 TechnologyDomain */
+  tech?: [string, number];
+  wood: number;
+  stone: number;
+  metal: number;
+  /** 提供的住房人数 */
+  housing: number;
+  /** 建成年限（年，随工具技术缩短） */
+  work: number;
+  desc: string;
+}
+
+export interface Building {
+  id: number;
+  kind: BuildingKind;
+  x: number;
+  y: number;
+  builtYear: number;
+  /** 建造进度 0..1 */
+  progress: number;
+}
+
+export type SettlementStage = 'camp' | 'hamlet' | 'village' | 'town' | 'city';
+
+export const STAGE_NAMES: Record<SettlementStage, string> = {
+  camp: '营地',
+  hamlet: '小村',
+  village: '村庄',
+  town: '城镇',
+  city: '城市',
+};
+
+export interface Settlement {
+  id: number;
+  name: string;
+  x: number;
+  y: number;
+  stage: SettlementStage;
+  population: number;
+  buildings: Building[];
+  food: number;
+  wood: number;
+  stone: number;
+  metal: number;
+  /** 领地半径（格） */
+  radius: number;
+  /** 连续食物短缺年数 */
+  shortageYears: number;
+  /** 正在建造 */
+  construction: Building[];
+  founded: number;
+  /** 短期祝福/惩罚效果 */
+  effects: { kind: string; years: number; power: number }[];
+  dead: boolean;
+  /** 最近一次饥荒年份 */
+  lastFamine: number;
+}
+
+export enum TechDomain {
+  Agriculture = 'agriculture',
+  Crafting = 'crafting',
+  Building = 'building',
+  Commerce = 'commerce',
+  Governance = 'governance',
+  Medicine = 'medicine',
+  Industry = 'industry',
+  Education = 'education',
+}
+
+export const TECH_NAMES: Record<TechDomain, string> = {
+  [TechDomain.Agriculture]: '农耕',
+  [TechDomain.Crafting]: '工具',
+  [TechDomain.Building]: '营造',
+  [TechDomain.Commerce]: '商贸',
+  [TechDomain.Governance]: '治理',
+  [TechDomain.Medicine]: '医道',
+  [TechDomain.Industry]: '工业',
+  [TechDomain.Education]: '文教',
+};
+
+export type SocietyForm =
+  | 'primitive'
+  | 'slave'
+  | 'feudal'
+  | 'capitalist'
+  | 'socialist'
+  | 'collapsed';
+
+export const FORM_NAMES: Record<SocietyForm, string> = {
+  primitive: '原始社会',
+  slave: '奴隶制社会',
+  feudal: '封建社会',
+  capitalist: '资本主义社会',
+  socialist: '社会主义社会',
+  collapsed: '文明废墟',
+};
+
+/** 宏观社会变量（文明级），即提示词 §6.2 的落地。 */
+export interface SocietyVars {
+  population: number;
+  /** 生产资料所有制占比 */
+  ownCommon: number;
+  ownPrivate: number;
+  ownPublic: number;
+  /** 劳动关系占比 */
+  laborForced: number;
+  laborBonded: number;
+  laborWage: number;
+  laborCoop: number;
+  /** 土地集中度 0..1 */
+  landConcentration: number;
+  /** 市场发育 0..1 */
+  market: number;
+  /** 国家/公共组织能力 0..1 */
+  stateCapacity: number;
+  /** 公共服务覆盖 0..1 */
+  publicServices: number;
+  /** 教育水平 0..1 */
+  education: number;
+  /** 分工程度 0..1 */
+  specialization: number;
+  /** 人均实际消费（相对基准） */
+  livingStandard: number;
+  /** 制度信任 0..1 */
+  trust: number;
+  /** 政治参与 0..1 */
+  participation: number;
+  /** 社会冲突风险 0..1 */
+  unrest: number;
+  /** 环境质量 0..1 */
+  environment: number;
+  /** 资源压力 0..1 */
+  resourcePressure: number;
+  /** 各群体财富份额 */
+  wealthCommon: number;
+  wealthElite: number;
+  wealthMiddle: number;
+  /** 群体组织能力 */
+  orgCommon: number;
+  orgElite: number;
+}
+
+/** 社会群体（简化三阶层，用于叙事与分配）。 */
+export interface SocialGroup {
+  id: 'commoners' | 'elite' | 'middle';
+  name: string;
+  /** 思想倾向 -1..1（-1 保守，+1 激进；用于改革方向） */
+  ideas: number;
+}
+
+export interface TechState {
+  levels: Record<string, number>;
+  /** 累计知识点 */
+  points: number;
+  /** 各域积累（跨等级进度） */
+  progress: Record<string, number>;
+}
+
+export type EventCategory =
+  | 'harvest' | 'famine' | 'plague' | 'disaster' | 'invention'
+  | 'migration' | 'trade' | 'wealth' | 'labor' | 'politics'
+  | 'war' | 'ideas' | 'institution' | 'urban' | 'achievement';
+
+export interface EventRecord {
+  id: string;
+  year: number;
+  title: string;
+  category: EventCategory;
+  /** 叙事正文 */
+  text: string;
+  /** 原因（来自真实模拟变量） */
+  causes: string[];
+  /** 实际结果 */
+  effects: string[];
+  /** 玩家是否介入 */
+  intervened: boolean;
+  settlementId?: number;
+  severity: number;
+}
+
+export interface ActiveEvent {
+  id: string;
+  year: number;
+  yearsLeft: number;
+  data: Record<string, number>;
+}
+
+export interface WeatherCell {
+  /** 干湿偏移 -1..1，正为多雨 */
+  wet: number;
+  years: number;
+}
+
+export interface ChronicleEntry extends EventRecord {
+  /** 分支节点标记 */
+  node?: boolean;
+}
+
+export type GodPowerId =
+  | 'forest' | 'fertile' | 'water' | 'ore'
+  | 'rain' | 'drought'
+  | 'blessing'
+  | 'enlighten'
+  | 'ideas';
+
+export type PlayMode = 'free' | 'limited';
+
+export interface GameConfig {
+  seed: number;
+  size: number;
+  mode: PlayMode;
+  /** 初始定居数 */
+  settlements: number;
+  scenario: 'dawn' | 'valley';
+}
+
+export interface HistorySample {
+  year: number;
+  pop: number;
+  food: number;
+  unrest: number;
+  elite: number;
+  form: SocietyForm;
+}
+
+export interface WorldState {
+  config: GameConfig;
+  year: number;
+  tiles: Tile[];
+  weather: WeatherCell[];
+  settlements: Settlement[];
+  civ: {
+    form: SocietyForm;
+    formSince: number;
+    prevForm: SocietyForm | null;
+    vars: SocietyVars;
+    tech: TechState;
+    groups: SocialGroup[];
+    /** 战争俘虏等冲击的记忆（衰减） */
+    warMemory: number;
+    /** 启蒙思潮强度 0..1（神力可提升，影响组织与改革） */
+    enlightenment: number;
+  };
+  chronicle: ChronicleEntry[];
+  activeEvents: ActiveEvent[];
+  /** 观察者曲线采样 */
+  history: HistorySample[];
+  /** 神力使用记录（编年史视角） */
+  interventions: number;
+  /** 神力能量（有限模式） */
+  divine: number;
+  divineMax: number;
+  rng: Rng;
+  nextBuildingId: number;
+  nextEventId: number;
+  /** 分支快照（里程碑节点） */
+  snapshots: { year: number; label: string; data: string }[];
+}

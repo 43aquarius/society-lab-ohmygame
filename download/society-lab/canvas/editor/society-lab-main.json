@@ -1,0 +1,26 @@
+{
+  "version": 1,
+  "nodes": {
+    "node-design-doc": {
+      "x": 96,
+      "y": 96
+    },
+    "node-model-doc": {
+      "x": 96,
+      "y": 480
+    },
+    "node-art-doc": {
+      "x": 560,
+      "y": 96
+    },
+    "node-loop-summary": {
+      "x": 560,
+      "y": 480
+    }
+  },
+  "viewport": {
+    "x": 0,
+    "y": 0,
+    "zoom": 0.9
+  }
+}
